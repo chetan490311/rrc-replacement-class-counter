@@ -1,0 +1,10 @@
+{
+  "appId": "np.kmc.rrc",
+  "appName": "RRC",
+  "webDir": "dist",
+  "plugins": {
+    "Preferences": {
+      "group": "RRC"
+    }
+  }
+}
