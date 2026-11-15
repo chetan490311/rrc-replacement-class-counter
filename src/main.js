@@ -1,121 +1,1223 @@
 
-import { Preferences } from '@capacitor/preferences';
-import * as XLSX from 'xlsx';
 import './style.css';
 
-const KEY='rrc-v1-data';
-const weekdays=['Monday','Tuesday','Wednesday','Thursday','Friday'];
-const defaultData={teachers:[],routine:{},records:[],school:'KMC',department:'',lastImport:null};
-let data=defaultData, selectedDate=new Date().toISOString().slice(0,10), selectedDay=weekdays[(new Date().getDay()+6)%7]||'Monday', tab='counter', editingTeacher=null;
+import {
+  loadData,
+  saveData,
+  createBackup,
+  restoreBackup
+} from './storage.js';
 
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-async function load(){try{const x=await Preferences.get({key:KEY});if(x.value)data={...defaultData,...JSON.parse(x.value)}}catch(e){console.warn(e)}}
-async function save(){await Preferences.set({key:KEY,value:JSON.stringify(data)});render()}
-function norm(s){return String(s||'').replace(/\s+/g,' ').trim().toUpperCase()}
-function parseCell(value){
-  const raw=String(value??'').replace(/\r/g,'').trim();
-  if(!raw)return {subject:'',teachers:'',raw:''};
-  const lines=raw.split('\n').map(x=>x.trim()).filter(Boolean);
-  const first=lines[0]||'';
-  const second=lines.slice(1).join(' ').replace(/\s+/g,' ').trim();
-  const isLab=/LAB/i.test(first);
-  return {subject:first,teachers:second||'',raw,isLab};
+import {
+  WEEKDAYS,
+  PERIOD_COUNT,
+  DEFAULT_SECTIONS,
+  SECTIONS,
+  setSections,
+  ensureRoutineSections,
+  createSundayRoutine,
+  deleteSundayRoutine,
+  updatePeriod
+} from './routine.js';
+
+import {
+  addSubject,
+  assignTeacherToSubject,
+  removeTeacherFromSubject,
+  getTeachersForSubject
+} from './subjects.js';
+
+import {
+  addTimingChange,
+  getTimingsForDate
+} from './period-timings.js';
+
+import {
+  validateBSDate,
+  todayBS,
+  getWeekdayFromBS,
+  bsToAd
+} from './nepali-date.js';
+
+import {
+  addTeacherChange,
+  getTeacherForDate
+} from './teacher-history.js';
+
+import {
+  createReplacementRecord
+} from './replacements.js';
+
+let data;
+let tab = 'counter';
+let selectedBS = todayBS();
+let selectedDay = 'Monday';
+let selectedSection = '';
+let editingTeacher = null;
+
+const $ = selector => document.querySelector(selector);
+
+const esc = value =>
+  String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  })[char]);
+
+function notify(message) {
+  alert(message);
 }
-function sectionName(v){return String(v||'').replace(/\s*\([^)]*\)/g,'').trim()}
-function routineRows(day){return data.routine[day]||[]}
-function teacherSections(t){
-  const initials=norm(t.initials);
-  const out=[];
-  for(const day of weekdays) for(const row of routineRows(day)){
-    for(let p=0;p<row.cells.length;p++){
-      const c=parseCell(row.cells[p]);
-      const tokens=norm(c.teachers).split(/[+,\s]+/).filter(Boolean);
-      if(tokens.includes(initials)) out.push({day,section:row.section,period:p+1,subject:c.subject,lab:!!c.isLab});
+
+function persist() {
+  return saveData(data);
+}
+
+function refreshSections() {
+  setSections(data.sections);
+  ensureRoutineSections(data.masterRoutine);
+  if (!data.sections.includes(selectedSection)) {
+    selectedSection = data.sections[0] || '';
+  }
+}
+
+function initialiseData() {
+  if (!Array.isArray(data.sections)) {
+    data.sections = [...DEFAULT_SECTIONS];
+  }
+
+  if (!Array.isArray(data.subjects)) data.subjects = [];
+  if (!Array.isArray(data.teachers)) data.teachers = [];
+  if (!Array.isArray(data.records)) data.records = [];
+  if (!Array.isArray(data.teacherHistory)) data.teacherHistory = [];
+
+  if (!data.masterRoutine) {
+    data.masterRoutine = {
+      weekdays: {},
+      specialDates: {}
+    };
+  }
+
+  if (!Array.isArray(data.timingHistory)) {
+    data.timingHistory = [{
+      effectiveFrom: '0000-00-00',
+      periods: Array.from({ length: PERIOD_COUNT }, (_, i) => ({
+        period: i + 1,
+        start: '',
+        end: ''
+      }))
+    }];
+  }
+
+  // Create subject registrations from any existing teacher subject fields.
+  for (const teacher of data.teachers) {
+    if (!teacher.id) teacher.id = crypto.randomUUID();
+
+    if (teacher.subject && !data.subjects.some(
+      subject => subject.name.toLowerCase() === teacher.subject.toLowerCase()
+    )) {
+      data.subjects.push({
+        id: crypto.randomUUID(),
+        name: teacher.subject,
+        teacherIds: [teacher.id],
+        createdAt: new Date().toISOString()
+      });
+    } else if (teacher.subject) {
+      const subject = data.subjects.find(
+        item => item.name.toLowerCase() === teacher.subject.toLowerCase()
+      );
+      if (subject && !subject.teacherIds.includes(teacher.id)) {
+        subject.teacherIds.push(teacher.id);
+      }
     }
   }
-  return out;
+
+  refreshSections();
 }
-function teacherLabs(t){
-  return teacherSections(t).filter(x=>x.lab);
+
+function weekdayForDate(bsDate) {
+  return getWeekdayFromBS(bsDate);
 }
-function activeTeachers(){return data.teachers}
-function addRecord(t, section, type, periods){
-  data.records.push({id:crypto.randomUUID(),dateBS:document.querySelector('#dateBS')?.value||'',dateAD:selectedDate,weekday:selectedDay,teacherId:t.id,teacher:t.name,initials:t.initials,subject:t.subject,section,type,periods:Number(periods),createdAt:new Date().toISOString()});
-  save();
+
+function getDateRoutine(bsDate) {
+  const day = weekdayForDate(bsDate);
+
+  if (day === 'Sunday') {
+    return data.masterRoutine.specialDates[bsDate]?.sections || null;
+  }
+
+  if (day === 'Saturday') return null;
+
+  return data.masterRoutine.weekdays[day] || null;
 }
-function shell(){return `<header><div class="brand"><div class="logo">R</div><div><b>RRC</b><small>REPLACEMENT CLASS COUNTER</small></div></div><div class="topmeta">OFFLINE RECORDS</div></header>
-<nav>${[['counter','Counter'],['teachers','Teachers'],['routine','Master routine'],['reports','Reports'],['backup','Backup']].map(([id,n])=>`<button class="${tab===id?'active':''}" data-tab="${id}">${n}</button>`).join('')}</nav><main id="view"></main><footer>RRC 1.0 · Local device storage · Verify imported routine before use</footer>`}
-function render(){document.querySelector('#app').innerHTML=shell();const v=document.querySelector('#view');v.innerHTML=tab==='counter'?counterView():tab==='teachers'?teachersView():tab==='routine'?routineView():tab==='reports'?reportsView():backupView();wire()}
-function counterView(){
- const dayRows=routineRows(selectedDay);
- const dateVal=selectedDate;
- return `<section class="hero"><div><span class="eyebrow">DAILY ENTRY</span><h1>Replacement counter</h1><p>Choose a date, then record a replacement for a teacher.</p></div><div class="total"><b>${data.records.filter(r=>r.dateAD===dateVal).reduce((a,r)=>a+r.periods,0)}</b><small>periods today</small></div></section>
- <div class="panel controls"><label>Date (AD for weekday lookup)<input id="dateAD" type="date" value="${esc(selectedDate)}"></label><label>Weekday routine<select id="weekday">${weekdays.map(d=>`<option ${d===selectedDay?'selected':''}>${d}</option>`).join('')}</select></label><label>Nepali date (BS)<input id="dateBS" placeholder="e.g. 2083-07-28" value="${esc(bsForDate(dateVal))}"></label></div>
- <div class="note">The current build stores the BS date you enter and uses the selected weekday sheet. Automatic BS–AD conversion will be added in the calendar integration stage.</div>
- ${activeTeachers().length?`<div class="teacher-grid">${activeTeachers().map(t=>`<button class="teacher-card" data-teacher="${t.id}"><b>${esc(t.initials)}</b><span>${esc(t.name)}</span><small>${esc(t.subject)}</small><em>Record replacement →</em></button>`).join('')}</div>`:'<div class="empty">Add teachers and import the master routine to begin.</div>'}
- <section class="panel"><h2>Entries for selected date</h2>${recordsForDate(dateVal).map(recordLine).join('')||'<p class="muted">No replacement entries for this date.</p>'}</section>`;
+
+function getAssignment(bsDate, section, period) {
+  const day = weekdayForDate(bsDate);
+
+  return getTeacherForDate(
+    data.masterRoutine,
+    data.teacherHistory,
+    bsDate,
+    day,
+    section,
+    period
+  );
 }
-function bsForDate(){return ''}
-function recordsForDate(d){return data.records.filter(r=>r.dateAD===d)}
-function recordLine(r){return `<div class="record"><div><b>${esc(r.initials)} · ${esc(r.teacher)}</b><small>${esc(r.section)} · ${esc(r.type)} · ${r.periods} period(s) · BS ${esc(r.dateBS)}</small></div><button class="danger small" data-delete-record="${r.id}">Undo</button></div>`}
-function teachersView(){return `<section class="hero"><div><span class="eyebrow">DIRECTORY</span><h1>Teachers</h1><p>Register the teachers who can receive replacement assignments.</p></div></section>
- <form id="teacherForm" class="panel formgrid"><h2>${editingTeacher?'Edit teacher':'Add teacher'}</h2><input type="hidden" id="teacherId" value="${editingTeacher?.id||''}"><label>Initials<input id="initials" required maxlength="12" value="${esc(editingTeacher?.initials||'')}" placeholder="CP"></label><label>Full name<input id="teacherName" required value="${esc(editingTeacher?.name||'')}" placeholder="Chetan Poudel"></label><label>Subject<input id="subject" required value="${esc(editingTeacher?.subject||'')}" placeholder="Physics"></label><button class="primary" type="submit">Save teacher</button></form>
- <section class="panel"><h2>Registered teachers (${data.teachers.length})</h2>${data.teachers.map(t=>`<div class="record"><div><b>${esc(t.initials)} · ${esc(t.name)}</b><small>${esc(t.subject)} · ${teacherSections(t).length} routine assignment(s)</small></div><div class="actions"><button class="small" data-edit-teacher="${t.id}">Edit</button><button class="danger small" data-remove-teacher="${t.id}">Delete</button></div></div>`).join('')||'<p class="muted">No teachers added yet.</p>'}</section>`}
-function routineView(){
- return `<section class="hero"><div><span class="eyebrow">MASTER TIMETABLE</span><h1>Import & edit routine</h1><p>Import the five weekday sheets, review extracted cells, then save your corrected version.</p></div></section>
- <section class="panel"><h2>1. Upload Excel workbook</h2><p class="muted">Supports .xlsx and .xls. Expected layout: section labels in column A; period cells in columns B–J. Cells may contain subject on the first line and teacher initials on the next line.</p><input type="file" id="excelFile" accept=".xlsx,.xls"><button class="primary" id="importBtn">Import workbook</button><div id="importStatus" class="muted"></div></section>
- <section class="panel"><h2>2. Edit imported cells</h2><div class="toolbar"><label>Day<select id="routineDay">${weekdays.map(d=>`<option>${d}</option>`).join('')}</select></label><button class="primary" id="saveRoutine">Save routine edits</button></div><div id="routineEditor">${routineEditor('Monday')}</div></section>
- <section class="panel"><h2>3. Import review</h2><p class="muted">The importer keeps the raw cell text for manual correction. Check all teacher initials and lab entries before using the counter.</p><p>${data.lastImport?`Last imported: ${esc(data.lastImport)} · ${weekdays.reduce((n,d)=>n+routineRows(d).length,0)} section rows`:'No workbook imported yet.'}</p></section>`;
+
+function getSubjectName(subjectId) {
+  return data.subjects.find(item => item.id === subjectId)?.name || '';
 }
-function routineEditor(day){
- const rows=routineRows(day);if(!rows.length)return '<p class="muted">No data for this weekday yet.</p>';
- return `<div class="tablewrap"><table class="routine"><thead><tr><th>Section</th>${Array.from({length:9},(_,i)=>`<th>P${i+1}</th>`).join('')}</tr></thead><tbody>${rows.map((r,ri)=>`<tr><td><input data-section="${ri}" value="${esc(r.section)}"></td>${r.cells.map((c,ci)=>`<td><textarea data-cell="${ri}:${ci}" rows="2">${esc(c||'')}</textarea></td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+
+function header() {
+  const tabs = [
+    ['counter', 'Counter'],
+    ['sections', 'Sections'],
+    ['teachers', 'Teachers'],
+    ['subjects', 'Subjects'],
+    ['routine', 'Master Routine'],
+    ['changes', 'Teacher Changes'],
+    ['timings', 'Period Timings'],
+    ['reports', 'Reports'],
+    ['backup', 'Backup']
+  ];
+
+  return `
+    <header>
+      <div class="brand">
+        <div class="logo">R</div>
+        <div><b>RRC</b><small>REPLACEMENT CLASS COUNTER</small></div>
+      </div>
+      <div class="topmeta">OFFLINE RECORDS</div>
+    </header>
+    <nav>
+      ${tabs.map(([id, name]) => `
+        <button data-tab="${id}" class="${tab === id ? 'active' : ''}">
+          ${name}
+        </button>
+      `).join('')}
+    </nav>
+    <main id="view"></main>
+    <footer>RRC · Replacement Class Counter</footer>
+  `;
 }
-function reportsView(){
- const total=data.records.reduce((a,r)=>a+r.periods,0);
- const grouped={};for(const r of data.records){const k=r.teacher;grouped[k]??={initials:r.initials,periods:0,dates:[],sections:[]};grouped[k].periods+=r.periods;grouped[k].dates.push(`${r.dateBS||r.dateAD} (${r.section})`);grouped[k].sections.push(r.section)}
- return `<section class="hero"><div><span class="eyebrow">REPORTS</span><h1>Replacement summary</h1><p>Teacher totals and detailed assignment dates.</p></div><div class="total"><b>${total}</b><small>periods recorded</small></div></section><section class="panel"><div class="toolbar"><label>From (AD)<input id="fromDate" type="date"></label><label>To (AD)<input id="toDate" type="date"></label><button class="primary" id="filterReport">Filter</button><button id="pngReport">Print / Save report</button></div><div id="reportTable">${reportTable(grouped)}</div></section>`;
+
+function hero(title, description) {
+  return `
+    <section class="hero">
+      <div>
+        <span class="eyebrow">RRC MANAGEMENT</span>
+        <h1>${title}</h1>
+        <p>${description}</p>
+      </div>
+    </section>
+  `;
 }
-function reportTable(g){return `<div class="tablewrap"><table><thead><tr><th>Initials</th><th>Teacher</th><th>Replacement classes</th><th>Dates / sections</th></tr></thead><tbody>${Object.entries(g).map(([n,x])=>`<tr><td>${esc(x.initials)}</td><td>${esc(n)}</td><td>${x.periods}</td><td>${esc(x.dates.join(', '))}</td></tr>`).join('')}</tbody></table></div>`}
-function backupView(){return `<section class="hero"><div><span class="eyebrow">DATA SAFETY</span><h1>Backup & restore</h1><p>Keep a copy of teacher records, routine edits and replacement history.</p></div></section><section class="panel"><button class="primary" id="exportBackup">Download JSON backup</button><label class="filelabel">Restore from backup<input id="restoreBackup" type="file" accept=".json,application/json"></label><p class="muted">Store backup files somewhere safe. Clearing app data or uninstalling the app can erase local records if you have not exported a backup.</p></section>`}
-function openEntry(tid){
- const t=data.teachers.find(x=>x.id===tid);if(!t)return;
- const matches=teacherSections(t).filter(x=>x.day===selectedDay);
- const classes=[...new Set(matches.filter(x=>!x.lab).map(x=>x.section))];
- const labEligible=/physics/i.test(t.subject)?'Physics Lab':/chem/i.test(t.subject)?'Chemistry Lab':/bio/i.test(t.subject)?'Biology Lab':/computer|ict/i.test(t.subject)?'Computer Lab':null;
- const labAssignments=matches.filter(x=>x.lab);
- const labs=labEligible?[labEligible]:[...new Set(labAssignments.map(x=>x.subject.replace(/LAB.*/i,'Lab').trim()))];
- const options=[...classes.map(x=>({name:x,type:'Section'})),...labs.map(x=>({name:x,type:'Lab'}))];
- const modal=document.createElement('dialog');modal.className='modal';
- modal.innerHTML=`<form method="dialog" class="modalbox"><button class="close" value="cancel">×</button><h2>${esc(t.initials)} · ${esc(t.name)}</h2><p class="muted">${esc(t.subject)} · ${selectedDay}</p><label>Choose section / lab<select id="entryPlace">${options.map(o=>`<option value="${esc(o.name)}" data-type="${o.type}">${esc(o.name)}${o.type==='Lab'?' (Laboratory)':''}</option>`).join('')}</select></label><div id="labPeriods" class="hidden"><label>Laboratory periods<select id="periodCount"><option value="1">One period</option><option value="2">Both periods</option></select></label></div><button class="primary" id="saveEntry" value="default" ${options.length?'':'disabled'}>Save replacement</button><p class="muted">${options.length?'Only routine-matched sections and eligible subject labs are listed.':'No matching section found for this teacher on this weekday. Check teacher initials in the routine editor.'}</p></form>`;
- document.body.append(modal);
- const place=modal.querySelector('#entryPlace'), lab=modal.querySelector('#labPeriods');
- const toggle=()=>{const op=place.selectedOptions[0];lab.classList.toggle('hidden',op?.dataset.type!=='Lab')};place.addEventListener('change',toggle);toggle();
- modal.querySelector('#saveEntry').addEventListener('click',e=>{e.preventDefault();if(!options.length)return;const op=place.selectedOptions[0];addRecord(t,place.value,op.dataset.type,op.dataset.type==='Lab'?modal.querySelector('#periodCount').value:1);modal.close();modal.remove()});
- modal.addEventListener('close',()=>modal.remove());modal.showModal();
+
+function render() {
+  document.querySelector('#app').innerHTML = header();
+
+  const views = {
+    counter: counterView,
+    sections: sectionsView,
+    teachers: teachersView,
+    subjects: subjectsView,
+    routine: routineView,
+    changes: changesView,
+    timings: timingsView,
+    reports: reportsView,
+    backup: backupView
+  };
+
+  $('#view').innerHTML = views[tab]();
+  wire();
 }
-function wire(){
- document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;editingTeacher=null;render()});
- const date=document.querySelector('#dateAD');if(date)date.onchange=()=>{selectedDate=date.value;const d=new Date(date.value+'T12:00:00');selectedDay=weekdays[(d.getDay()+6)%7]||'Monday';render()};
- const wd=document.querySelector('#weekday');if(wd)wd.onchange=()=>{selectedDay=wd.value;render()};
- document.querySelectorAll('[data-teacher]').forEach(b=>b.onclick=()=>openEntry(b.dataset.teacher));
- document.querySelectorAll('[data-delete-record]').forEach(b=>b.onclick=()=>{if(confirm('Undo this replacement entry?')){data.records=data.records.filter(r=>r.id!==b.dataset.deleteRecord);save()}});
- const tf=document.querySelector('#teacherForm');if(tf)tf.onsubmit=e=>{e.preventDefault();const id=document.querySelector('#teacherId').value;const obj={id:id||crypto.randomUUID(),initials:document.querySelector('#initials').value.trim(),name:document.querySelector('#teacherName').value.trim(),subject:document.querySelector('#subject').value.trim()};if(id)data.teachers=data.teachers.map(t=>t.id===id?obj:t);else data.teachers.push(obj);editingTeacher=null;save()};
- document.querySelectorAll('[data-edit-teacher]').forEach(b=>b.onclick=()=>{editingTeacher=data.teachers.find(t=>t.id===b.dataset.editTeacher);render()});
- document.querySelectorAll('[data-remove-teacher]').forEach(b=>b.onclick=()=>{if(confirm('Delete this teacher? Existing replacement history will remain.')){data.teachers=data.teachers.filter(t=>t.id!==b.dataset.removeTeacher);save()}});
- const day=document.querySelector('#routineDay');if(day)day.onchange=()=>{document.querySelector('#routineEditor').innerHTML=routineEditor(day.value);wireRoutineSave()};
- wireRoutineSave();
- const file=document.querySelector('#excelFile'),btn=document.querySelector('#importBtn');if(btn)btn.onclick=async()=>{if(!file.files[0]){alert('Choose an Excel workbook first.');return}try{const buf=await file.files[0].arrayBuffer();const wb=XLSX.read(buf,{type:'array'});const next={};for(const d of weekdays){const ws=wb.Sheets[d];if(!ws){next[d]=[];continue}const range=XLSX.utils.decode_range(ws['!ref']||'A1');const rows=[];for(let r=range.s.r+4;r<=range.e.r;r++){const label=ws[XLSX.utils.encode_cell({r,c:0})]?.v;if(!label||!/^(XI|XII)\\s*M\\s*\\d+/i.test(String(label).trim()))continue;const cells=[];for(let c=1;c<=9;c++){const cell=ws[XLSX.utils.encode_cell({r,c})];cells.push(cell?.v==null?'':String(cell.v))}rows.push({section:sectionName(label),rawSection:String(label),cells})}next[d]=rows}data.routine=next;data.lastImport=new Date().toLocaleString();await save();document.querySelector('#importStatus').textContent=`Imported ${weekdays.reduce((n,d)=>n+next[d].length,0)} section rows from ${wb.SheetNames.length} worksheet(s). Review every sheet before approval.`;document.querySelector('#routineEditor').innerHTML=routineEditor('Monday');wireRoutineSave()}catch(err){alert('Could not read workbook: '+err.message)}};
- const saveR=document.querySelector('#saveRoutine');if(saveR)saveR.onclick=()=>{const d=document.querySelector('#routineDay').value;const rows=data.routine[d]||[];document.querySelectorAll('[data-section]').forEach(i=>rows[Number(i.dataset.section)].section=i.value);document.querySelectorAll('[data-cell]').forEach(i=>{const [r,c]=i.dataset.cell.split(':').map(Number);rows[r].cells[c]=i.value});data.routine[d]=rows;save();alert(d+' routine saved.')};
- const ex=document.querySelector('#exportBackup');if(ex)ex.onclick=()=>download('rrc-backup.json',JSON.stringify(data,null,2),'application/json');
- const restore=document.querySelector('#restoreBackup');if(restore)restore.onchange=async()=>{try{data={...defaultData,...JSON.parse(await restore.files[0].text())};await save();alert('Backup restored.')}catch(e){alert('Invalid backup file.')}};
- const filter=document.querySelector('#filterReport');if(filter)filter.onclick=()=>{const from=document.querySelector('#fromDate').value,to=document.querySelector('#toDate').value;const g={};for(const r of data.records){if(from&&r.dateAD<from||to&&r.dateAD>to)continue;g[r.teacher]??={initials:r.initials,periods:0,dates:[]};g[r.teacher].periods+=r.periods;g[r.teacher].dates.push(`${r.dateBS||r.dateAD} (${r.section})`)}document.querySelector('#reportTable').innerHTML=reportTable(g)};
- const png=document.querySelector('#pngReport');if(png)png.onclick=()=>window.print();
+
+function sectionsView() {
+  return `
+    ${hero('Section management', 'Add, rename or remove your college sections.')}
+    <section class="panel">
+      <h2>Add a new section</h2>
+      <form id="addSectionForm" class="inline-form">
+        <input id="newSection" required placeholder="e.g. XII M11">
+        <button class="primary">Add section</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Current sections (${data.sections.length})</h2>
+      ${data.sections.map(section => `
+        <div class="record">
+          <b>${esc(section)}</b>
+          <div class="actions">
+            <button class="small" data-rename-section="${esc(section)}">Rename</button>
+            <button class="danger small" data-remove-section="${esc(section)}">Remove</button>
+          </div>
+        </div>
+      `).join('') || '<p class="muted">No sections added.</p>'}
+    </section>
+  `;
 }
-function wireRoutineSave(){const saveR=document.querySelector('#saveRoutine');if(saveR)saveR.onclick=()=>{const d=document.querySelector('#routineDay').value;const rows=data.routine[d]||[];document.querySelectorAll('[data-section]').forEach(i=>rows[Number(i.dataset.section)].section=i.value);document.querySelectorAll('[data-cell]').forEach(i=>{const [r,c]=i.dataset.cell.split(':').map(Number);rows[r].cells[c]=i.value});data.routine[d]=rows;save();alert(d+' routine saved.')}}
-function download(name,content,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([content],{type}));a.download=name;a.click();URL.revokeObjectURL(a.href)}
-load().then(() => {
+
+function teachersView() {
+  return `
+    ${hero('Teacher directory', 'Register teachers and manage their details.')}
+    <section class="panel">
+      <h2>${editingTeacher ? 'Edit teacher' : 'Add teacher'}</h2>
+      <form id="teacherForm" class="formgrid">
+        <input type="hidden" id="teacherId" value="${editingTeacher?.id || ''}">
+        <label>Initials
+          <input id="teacherInitials" required maxlength="12"
+            value="${esc(editingTeacher?.initials || '')}" placeholder="CP">
+        </label>
+        <label>Full name
+          <input id="teacherName" required
+            value="${esc(editingTeacher?.name || '')}" placeholder="Full name">
+        </label>
+        <button class="primary">Save teacher</button>
+        ${editingTeacher ? '<button type="button" id="cancelTeacher">Cancel edit</button>' : ''}
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Registered teachers (${data.teachers.length})</h2>
+      ${data.teachers.map(teacher => `
+        <div class="record">
+          <div>
+            <b>${esc(teacher.initials)} · ${esc(teacher.name)}</b>
+            <small>${teacherSubjects(teacher.id).map(s => esc(s.name)).join(', ') || 'No subject assigned yet'}</small>
+          </div>
+          <div class="actions">
+            <button class="small" data-edit-teacher="${teacher.id}">Edit</button>
+            <button class="danger small" data-delete-teacher="${teacher.id}">Delete</button>
+          </div>
+        </div>
+      `).join('') || '<p class="muted">No teachers registered yet.</p>'}
+    </section>
+  `;
+}
+
+function teacherSubjects(teacherId) {
+  return data.subjects.filter(subject => subject.teacherIds.includes(teacherId));
+}
+
+function subjectsView() {
+  return `
+    ${hero('Subject management', 'Register subjects and select the teachers who teach each subject.')}
+    <section class="panel">
+      <h2>Add subject</h2>
+      <form id="subjectForm" class="inline-form">
+        <input id="subjectName" required placeholder="e.g. Physics">
+        <button class="primary">Add subject</button>
+      </form>
+    </section>
+    ${data.subjects.map(subject => `
+      <section class="panel">
+        <h2>${esc(subject.name)}</h2>
+        <label>Assign a teacher
+          <select data-subject-teacher="${subject.id}">
+            <option value="">Choose teacher</option>
+            ${data.teachers.map(teacher => `
+              <option value="${teacher.id}">
+                ${esc(teacher.initials)} · ${esc(teacher.name)}
+              </option>
+            `).join('')}
+          </select>
+        </label>
+        <div class="record-list">
+          ${getTeachersForSubject(data.subjects, subject.id, data.teachers).map(teacher => `
+            <div class="record">
+              <span>${esc(teacher.initials)} · ${esc(teacher.name)}</span>
+              <button class="danger small"
+                data-unassign="${subject.id}:${teacher.id}">Remove</button>
+            </div>
+          `).join('') || '<p class="muted">No teachers assigned.</p>'}
+        </div>
+      </section>
+    `).join('')}
+  `;
+}
+
+function routineView() {
+  const sundayDates = Object.keys(data.masterRoutine.specialDates).sort();
+
+  return `
+    ${hero('Master routine', 'Create the weekday timetable manually, one section at a time.')}
+    <section class="panel">
+      <div class="toolbar">
+        <label>Weekday
+          <select id="routineDay">
+            ${WEEKDAYS.map(day => `<option ${day === selectedDay ? 'selected' : ''}>${day}</option>`).join('')}
+          </select>
+        </label>
+        <label>Section
+          <select id="routineSection">
+            ${data.sections.map(section => `
+              <option ${section === selectedSection ? 'selected' : ''}>${esc(section)}</option>
+            `).join('')}
+          </select>
+        </label>
+      </div>
+      <p class="muted">Select a period cell to assign its subject and teacher.</p>
+      <div class="period-grid">
+        ${Array.from({ length: PERIOD_COUNT }, (_, i) => {
+          const assignment = data.masterRoutine.weekdays[selectedDay]?.[selectedSection]?.[i];
+          return `
+            <button class="period-card" data-edit-period="${i}">
+              <b>Period ${i + 1}</b>
+              <span>${esc(assignment?.subject || 'Not assigned')}</span>
+              <small>${esc(assignment?.teacherInitials || 'Choose teacher')}</small>
+              ${assignment?.isLab ? '<em>LAB</em>' : ''}
+            </button>
+          `;
+        }).join('')}
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Sunday special routine</h2>
+      <p class="muted">A Sunday routine is a separate copy for one specific date. Later weekday edits will not change it.</p>
+      <form id="sundayForm" class="inline-form">
+        <label>Sunday BS date
+          <input id="sundayDate" placeholder="YYYY-MM-DD" required>
+        </label>
+        <label>Copy routine from
+          <select id="sundaySource">
+            ${WEEKDAYS.map(day => `<option>${day}</option>`).join('')}
+          </select>
+        </label>
+        <button class="primary">Create Sunday routine</button>
+      </form>
+      ${sundayDates.map(date => `
+        <div class="record">
+          <b>BS ${date} · Copied from ${data.masterRoutine.specialDates[date].copiedFrom}</b>
+          <button class="danger small" data-delete-sunday="${date}">Delete</button>
+        </div>
+      `).join('') || '<p class="muted">No special Sunday routines yet.</p>'}
+    </section>
+  `;
+}
+
+function changesView() {
+  return `
+    ${hero('Teacher changes', 'Schedule a teacher change from any effective BS date. Earlier dates retain the previous assignment.')}
+    <section class="panel">
+      <h2>Add teacher change</h2>
+      <form id="changeForm" class="formgrid">
+        <label>Effective BS date
+          <input id="changeDate" placeholder="YYYY-MM-DD" required>
+        </label>
+        <label>Section
+          <select id="changeSection">
+            ${data.sections.map(s => `<option>${esc(s)}</option>`).join('')}
+          </select>
+        </label>
+        <label>Period
+          <select id="changePeriod">
+            ${Array.from({ length: PERIOD_COUNT }, (_, i) => `<option value="${i + 1}">Period ${i + 1}</option>`).join('')}
+          </select>
+        </label>
+        <label>New teacher
+          <select id="changeTeacher">
+            ${data.teachers.map(t => `<option value="${t.id}">${esc(t.initials)} · ${esc(t.name)}</option>`).join('')}
+          </select>
+        </label>
+        <button class="primary">Save teacher change</button>
+      </form>
+      <p class="muted">The selected date determines the weekday. The change applies to that weekday, section and period from that date onward.</p>
+    </section>
+    <section class="panel">
+      <h2>Saved changes</h2>
+      ${(data.teacherHistory || []).slice().sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)).map(change => `
+        <div class="record">
+          <div>
+            <b>${esc(change.section)} · Period ${change.period} · ${esc(change.teacherInitials)}</b>
+            <small>Effective BS ${esc(change.effectiveFrom)} · ${esc(change.weekday)} · ${esc(change.teacherName)}</small>
+          </div>
+        </div>
+      `).join('') || '<p class="muted">No teacher changes saved.</p>'}
+    </section>
+  `;
+}
+
+function timingsView() {
+  const base = data.timingHistory.find(t => t.effectiveFrom === '0000-00-00')
+    || data.timingHistory[0];
+
+  return `
+    ${hero('Period timings', 'Set your default period schedule and future date-effective changes.')}
+    <section class="panel">
+      <h2>Default period timings</h2>
+      <form id="defaultTimingForm">
+        ${timingInputs(base?.periods || [])}
+        <button class="primary">Save default timings</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Schedule a timing change</h2>
+      <form id="timingChangeForm">
+        <label>Effective BS date
+          <input id="timingDate" placeholder="YYYY-MM-DD" required>
+        </label>
+        ${timingInputs(base?.periods || [], 'future')}
+        <button class="primary">Save new schedule</button>
+      </form>
+    </section>
+    <section class="panel">
+      <h2>Saved timing schedules</h2>
+      ${data.timingHistory.map(item => `
+        <div class="record">
+          <b>${item.effectiveFrom === '0000-00-00' ? 'Default schedule' : `Effective BS ${esc(item.effectiveFrom)}`}</b>
+          <small>${item.periods.filter(p => p.start && p.end).length} of ${PERIOD_COUNT} periods configured</small>
+        </div>
+      `).join('')}
+    </section>
+  `;
+}
+
+function timingInputs(periods, prefix = 'default') {
+  return `
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Period</th><th>Start</th><th>End</th></tr></thead>
+        <tbody>
+          ${Array.from({ length: PERIOD_COUNT }, (_, i) => {
+            const item = periods[i] || {};
+            return `
+              <tr>
+                <td>${i + 1}</td>
+                <td><input type="time" id="${prefix}Start${i}" value="${esc(item.start || '')}"></td>
+                <td><input type="time" id="${prefix}End${i}" value="${esc(item.end || '')}"></td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function counterView() {
+  const valid = validateBSDate(selectedBS);
+  const day = valid?.weekday || '';
+  const sections = getDateRoutine(selectedBS);
+  const entries = [];
+
+  if (sections) {
+    for (const section of data.sections) {
+      for (let i = 0; i < PERIOD_COUNT; i++) {
+        const assignment = getAssignment(selectedBS, section, i + 1);
+        if (assignment?.subject) {
+          entries.push({ section, period: i + 1, assignment });
+        }
+      }
+    }
+  }
+
+  return `
+    ${hero('Replacement counter', 'Select a BS date and record the teacher covering a scheduled class.')}
+    <section class="panel controls">
+      <label>Replacement date (BS)
+        <input id="counterDate" value="${esc(selectedBS)}" placeholder="YYYY-MM-DD">
+      </label>
+      <div class="date-info">
+        <b>${valid ? esc(day) : 'Invalid date'}</b>
+        <small>${valid ? `AD ${esc(valid.ad)}` : 'Use YYYY-MM-DD format'}</small>
+      </div>
+    </section>
+    ${!valid ? '<div class="note">Enter a valid Nepali date.</div>' : ''}
+    ${day === 'Saturday' ? '<div class="note">Saturday is closed by default.</div>' : ''}
+    ${day === 'Sunday' && !sections ? '<div class="note">No special Sunday routine exists for this date. Create one in Master Routine first.</div>' : ''}
+    ${sections ? `
+      <section class="panel">
+        <h2>Scheduled classes for BS ${esc(selectedBS)}</h2>
+        <p class="muted">Choose the class being covered, then choose the replacement teacher.</p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Section</th><th>Period</th><th>Subject</th><th>Scheduled teacher</th><th>Record</th></tr></thead>
+            <tbody>
+              ${entries.map(item => `
+                <tr>
+                  <td>${esc(item.section)}</td>
+                  <td>${item.period}</td>
+                  <td>${esc(item.assignment.subject)}</td>
+                  <td>${esc(item.assignment.teacherInitials || item.assignment.teacherName || '')}</td>
+                  <td><button class="primary small" data-replace="${esc(item.section)}:${item.period}">Replace</button></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        ${entries.length ? '' : '<p class="muted">No scheduled classes found for this date.</p>'}
+      </section>
+    ` : ''}
+    <section class="panel">
+      <h2>Entries for this date</h2>
+      ${data.records.filter(r => r.dateBS === selectedBS).map(record => `
+        <div class="record">
+          <div>
+            <b>${esc(record.teacherInitials)} · ${esc(record.teacher)}</b>
+            <small>${esc(record.section)} · ${esc(record.subject)} · Period ${record.period} · ${record.periods} period(s)</small>
+          </div>
+          <button class="danger small" data-delete-record="${record.id}">Undo</button>
+        </div>
+      `).join('') || '<p class="muted">No replacement entries for this date.</p>'}
+    </section>
+  `;
+}
+
+function reportsView() {
+  const grouped = new Map();
+
+  for (const record of data.records) {
+    const key = record.teacherId || record.teacher;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        initials: record.teacherInitials || record.initials || '',
+        name: record.teacher || record.teacherName || '',
+        total: 0,
+        dates: []
+      });
+    }
+
+    const item = grouped.get(key);
+    item.total += Number(record.periods || 1);
+    item.dates.push(`${record.dateBS} (${record.section}, P${record.period || 1})`);
+  }
+
+  const total = data.records.reduce((sum, r) => sum + Number(r.periods || 1), 0);
+
+  return `
+    ${hero('Replacement reports', 'Teacher-wise totals and dates of replacement classes.')}
+    <section class="panel">
+      <div class="total report-total"><b>${total}</b><small>Total replacement periods</small></div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Initials</th><th>Teacher</th><th>Periods</th><th>Dates and sections</th></tr></thead>
+          <tbody>
+            ${[...grouped.values()].map(item => `
+              <tr>
+                <td>${esc(item.initials)}</td>
+                <td>${esc(item.name)}</td>
+                <td>${item.total}</td>
+                <td>${esc(item.dates.join(', '))}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>
+      <button class="primary" id="printReport">Print report / Save as PDF</button>
+    </section>
+  `;
+}
+
+function backupView() {
+  return `
+    ${hero('Backup and restore', 'Save a copy of all RRC data or restore a previous backup.')}
+    <section class="panel">
+      <button class="primary" id="exportBackup">Download JSON backup</button>
+      <label class="filelabel">Restore backup
+        <input type="file" id="restoreFile" accept=".json,application/json">
+      </label>
+      <p class="muted">Keep backup files somewhere safe, especially before changing devices or reinstalling the app.</p>
+    </section>
+  `;
+}
+
+function openPeriodEditor(index) {
+  const periods = data.masterRoutine.weekdays[selectedDay]?.[selectedSection] || [];
+  const current = periods[index] || {};
+  const modal = document.createElement('dialog');
+  modal.className = 'modal';
+
+  modal.innerHTML = `
+    <form method="dialog" class="modalbox" id="periodForm">
+      <button class="close" value="cancel">×</button>
+      <h2>${esc(selectedSection)} · Period ${index + 1}</h2>
+      <label>Subject
+        <select id="periodSubject">
+          <option value="">Choose subject</option>
+          ${data.subjects.map(s => `
+            <option value="${s.id}" ${s.id === current.subjectId ? 'selected' : ''}>${esc(s.name)}</option>
+          `).join('')}
+          <option value="__lab_physics">Physics Lab</option>
+          <option value="__lab_chemistry">Chemistry Lab</option>
+          <option value="__lab_biology">Biology Lab</option>
+          <option value="__lab_computer">Computer Lab</option>
+        </select>
+      </label>
+      <label>Teacher
+        <select id="periodTeacher"><option value="">Choose subject first</option></select>
+      </label>
+      <label>Lab periods
+        <select id="labPeriods">
+          <option value="1">One period</option>
+          <option value="2" ${current.labPeriods === 2 ? 'selected' : ''}>Two consecutive periods</option>
+        </select>
+      </label>
+      <button class="primary" id="savePeriod">Save assignment</button>
+      <button type="button" class="danger" id="clearPeriod">Clear this period</button>
+    </form>
+  `;
+
+  document.body.append(modal);
+
+  const subjectSelect = modal.querySelector('#periodSubject');
+  const teacherSelect = modal.querySelector('#periodTeacher');
+
+  function updateTeachers() {
+    const subjectId = subjectSelect.value;
+    let teachers = [];
+
+    if (subjectId.startsWith('__lab_')) {
+      const key = subjectId.replace('__lab_', '');
+      const search = key === 'computer' ? /computer|ict/i : new RegExp(key, 'i');
+      teachers = data.teachers.filter(t =>
+        teacherSubjects(t.id).some(s => search.test(s.name))
+      );
+    } else {
+      teachers = getTeachersForSubject(data.subjects, subjectId, data.teachers);
+    }
+
+    teacherSelect.innerHTML = `
+      <option value="">Choose teacher</option>
+      ${teachers.map(t => `
+        <option value="${t.id}" ${t.id === current.teacherId ? 'selected' : ''}>
+          ${esc(t.initials)} · ${esc(t.name)}
+        </option>
+      `).join('')}
+    `;
+  }
+
+  subjectSelect.addEventListener('change', updateTeachers);
+  updateTeachers();
+
+  modal.querySelector('#savePeriod').addEventListener('click', async event => {
+    event.preventDefault();
+
+    const subjectId = subjectSelect.value;
+    const teacherId = teacherSelect.value;
+
+    if (!subjectId || !teacherId) {
+      notify('Choose a subject and its registered teacher.');
+      return;
+    }
+
+    const teacher = data.teachers.find(t => t.id === teacherId);
+    const lab = subjectId.startsWith('__lab_');
+    const subject = lab
+      ? subjectSelect.selectedOptions[0].textContent
+      : getSubjectName(subjectId);
+
+    updatePeriod(
+      data.masterRoutine,
+      selectedDay,
+      selectedSection,
+      index,
+      {
+        subjectId: lab ? '' : subjectId,
+        subject,
+        teacherId,
+        teacherInitials: teacher.initials,
+        teacherName: teacher.name,
+        isLab: lab,
+        labPeriods: Number(modal.querySelector('#labPeriods').value)
+      }
+    );
+
+    await persist();
+    modal.close();
+    modal.remove();
+    render();
+  });
+
+  modal.querySelector('#clearPeriod').addEventListener('click', async () => {
+    updatePeriod(
+      data.masterRoutine,
+      selectedDay,
+      selectedSection,
+      index,
+      {
+        subjectId: '',
+        subject: '',
+        teacherId: '',
+        teacherInitials: '',
+        teacherName: '',
+        isLab: false,
+        labPeriods: 1
+      }
+    );
+
+    await persist();
+    modal.close();
+    modal.remove();
+    render();
+  });
+
+  modal.addEventListener('close', () => modal.remove());
+  modal.showModal();
+}
+
+function openReplacement(section, period) {
+  const assignment = getAssignment(selectedBS, section, period);
+
+  if (!assignment?.subject) {
+    notify('There is no scheduled subject in this period.');
+    return;
+  }
+
+  const modal = document.createElement('dialog');
+  modal.className = 'modal';
+
+  modal.innerHTML = `
+    <form method="dialog" class="modalbox">
+      <button class="close" value="cancel">×</button>
+      <h2>Record replacement</h2>
+      <p class="muted">${esc(section)} · Period ${period} · ${esc(assignment.subject)}</p>
+      <p>Scheduled teacher: <b>${esc(assignment.teacherName || assignment.teacherInitials)}</b></p>
+      <label>Replacement teacher
+        <select id="replacementTeacher">
+          <option value="">Choose teacher</option>
+          ${data.teachers.map(t => `
+            <option value="${t.id}">${esc(t.initials)} · ${esc(t.name)}</option>
+          `).join('')}
+        </select>
+      </label>
+      <button class="primary" id="saveReplacement">Save replacement</button>
+    </form>
+  `;
+
+  document.body.append(modal);
+
+  modal.querySelector('#saveReplacement').addEventListener('click', async event => {
+    event.preventDefault();
+
+    const teacherId = modal.querySelector('#replacementTeacher').value;
+    const teacher = data.teachers.find(t => t.id === teacherId);
+
+    if (!teacher) {
+      notify('Choose the replacement teacher.');
+      return;
+    }
+
+    try {
+      const record = createReplacementRecord({
+        masterRoutine: data.masterRoutine,
+        teacherHistory: data.teacherHistory,
+        bsDate: selectedBS,
+        section,
+        period,
+        replacementTeacher: teacher,
+        periods: 1
+      });
+
+      data.records.push(record);
+      await persist();
+
+      modal.close();
+      modal.remove();
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
+  });
+
+  modal.addEventListener('close', () => modal.remove());
+  modal.showModal();
+}
+
+function wire() {
+  document.querySelectorAll('[data-tab]').forEach(button => {
+    button.onclick = () => {
+      tab = button.dataset.tab;
+      editingTeacher = null;
+      render();
+    };
+  });
+
+  const addSectionForm = $('#addSectionForm');
+  if (addSectionForm) {
+    addSectionForm.onsubmit = async event => {
+      event.preventDefault();
+      const name = $('#newSection').value.trim();
+
+      if (!name) return;
+      if (data.sections.some(s => s.toLowerCase() === name.toLowerCase())) {
+        notify('That section already exists.');
+        return;
+      }
+
+      data.sections.push(name);
+      refreshSections();
+      await persist();
+      render();
+    };
+  }
+
+  document.querySelectorAll('[data-rename-section]').forEach(button => {
+    button.onclick = async () => {
+      const oldName = button.dataset.renameSection;
+      const newName = prompt('Enter the new section name:', oldName)?.trim();
+
+      if (!newName || newName === oldName) return;
+      if (data.sections.some(s => s.toLowerCase() === newName.toLowerCase())) {
+        notify('That section name already exists.');
+        return;
+      }
+
+      data.sections = data.sections.map(s => s === oldName ? newName : s);
+
+      for (const day of WEEKDAYS) {
+        const routine = data.masterRoutine.weekdays[day];
+        if (routine?.[oldName]) {
+          routine[newName] = routine[oldName];
+          delete routine[oldName];
+        }
+      }
+
+      for (const special of Object.values(data.masterRoutine.specialDates)) {
+        if (special.sections?.[oldName]) {
+          special.sections[newName] = special.sections[oldName];
+          delete special.sections[oldName];
+        }
+      }
+
+      data.teacherHistory.forEach(change => {
+        if (change.section === oldName) change.section = newName;
+      });
+
+      data.records.forEach(record => {
+        if (record.section === oldName) record.section = newName;
+      });
+
+      refreshSections();
+      await persist();
+      render();
+    };
+  });
+
+  document.querySelectorAll('[data-remove-section]').forEach(button => {
+    button.onclick = async () => {
+      const section = button.dataset.removeSection;
+
+      if (!confirm(`Remove ${section}? Its routine assignments and teacher-change entries will also be removed. Replacement records will be retained.`)) {
+        return;
+      }
+
+      data.sections = data.sections.filter(s => s !== section);
+
+      for (const day of WEEKDAYS) {
+        delete data.masterRoutine.weekdays[day]?.[section];
+      }
+
+      for (const special of Object.values(data.masterRoutine.specialDates)) {
+        delete special.sections?.[section];
+      }
+
+      data.teacherHistory = data.teacherHistory.filter(
+        change => change.section !== section
+      );
+
+      refreshSections();
+      await persist();
+      render();
+    };
+  });
+
+  const teacherForm = $('#teacherForm');
+  if (teacherForm) {
+    teacherForm.onsubmit = async event => {
+      event.preventDefault();
+
+      const id = $('#teacherId').value;
+      const initials = $('#teacherInitials').value.trim();
+      const name = $('#teacherName').value.trim();
+
+      if (!initials || !name) return;
+
+      const teacher = {
+        id: id || crypto.randomUUID(),
+        initials,
+        name
+      };
+
+      if (id) {
+        data.teachers = data.teachers.map(t => t.id === id ? teacher : t);
+      } else {
+        data.teachers.push(teacher);
+      }
+
+      editingTeacher = null;
+      await persist();
+      render();
+    };
+  }
+
+  $('#cancelTeacher')?.addEventListener('click', () => {
+    editingTeacher = null;
+    render();
+  });
+
+  document.querySelectorAll('[data-edit-teacher]').forEach(button => {
+    button.onclick = () => {
+      editingTeacher = data.teachers.find(t => t.id === button.dataset.editTeacher);
+      render();
+    };
+  });
+
+  document.querySelectorAll('[data-delete-teacher]').forEach(button => {
+    button.onclick = async () => {
+      const id = button.dataset.deleteTeacher;
+      if (!confirm('Delete this teacher from the directory? Historical records will remain.')) return;
+
+      data.teachers = data.teachers.filter(t => t.id !== id);
+      data.subjects.forEach(s => {
+        s.teacherIds = s.teacherIds.filter(teacherId => teacherId !== id);
+      });
+
+      await persist();
+      render();
+    };
+  });
+
+  const subjectForm = $('#subjectForm');
+  if (subjectForm) {
+    subjectForm.onsubmit = async event => {
+      event.preventDefault();
+      try {
+        addSubject(data.subjects, $('#subjectName').value);
+        await persist();
+        render();
+      } catch (error) {
+        notify(error.message);
+      }
+    };
+  }
+
+  document.querySelectorAll('[data-subject-teacher]').forEach(select => {
+    select.onchange = async () => {
+      if (!select.value) return;
+      try {
+        assignTeacherToSubject(data.subjects, select.dataset.subjectTeacher, select.value);
+        await persist();
+        render();
+      } catch (error) {
+        notify(error.message);
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-unassign]').forEach(button => {
+    button.onclick = async () => {
+      const [subjectId, teacherId] = button.dataset.unassign.split(':');
+      removeTeacherFromSubject(data.subjects, subjectId, teacherId);
+      await persist();
+      render();
+    };
+  });
+
+  $('#routineDay')?.addEventListener('change', event => {
+    selectedDay = event.target.value;
+    render();
+  });
+
+  $('#routineSection')?.addEventListener('change', event => {
+    selectedSection = event.target.value;
+    render();
+  });
+
+  document.querySelectorAll('[data-edit-period]').forEach(button => {
+    button.onclick = () => openPeriodEditor(Number(button.dataset.editPeriod));
+  });
+
+  $('#sundayForm')?.addEventListener('submit', async event => {
+    event.preventDefault();
+
+    const date = $('#sundayDate').value.trim();
+    const valid = validateBSDate(date);
+
+    if (!valid || valid.weekday !== 'Sunday') {
+      notify('Enter a valid BS date that falls on Sunday.');
+      return;
+    }
+
+    try {
+      createSundayRoutine(data.masterRoutine, date, $('#sundaySource').value);
+      await persist();
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
+  });
+
+  document.querySelectorAll('[data-delete-sunday]').forEach(button => {
+    button.onclick = async () => {
+      const date = button.dataset.deleteSunday;
+      if (!confirm(`Delete the special routine for BS ${date}?`)) return;
+      deleteSundayRoutine(data.masterRoutine, date);
+      await persist();
+      render();
+    };
+  });
+
+  $('#changeForm')?.addEventListener('submit', async event => {
+    event.preventDefault();
+
+    const effectiveFrom = $('#changeDate').value.trim();
+    const valid = validateBSDate(effectiveFrom);
+
+    if (!valid || !WEEKDAYS.includes(valid.weekday)) {
+      notify('Choose a valid Monday–Friday BS date.');
+      return;
+    }
+
+    const section = $('#changeSection').value;
+    const period = Number($('#changePeriod').value);
+    const teacher = data.teachers.find(t => t.id === $('#changeTeacher').value);
+    const original = getAssignment(effectiveFrom, section, period);
+
+    if (!original?.subject) {
+      notify('There is no subject assigned to this section and period on that weekday.');
+      return;
+    }
+
+    if (!teacher) {
+      notify('Choose a registered teacher.');
+      return;
+    }
+
+    try {
+      addTeacherChange(data.teacherHistory, {
+        effectiveFrom,
+        weekday: valid.weekday,
+        section,
+        period,
+        teacherId: teacher.id,
+        teacherName: teacher.name,
+        teacherInitials: teacher.initials,
+        subject: original.subject
+      });
+
+      await persist();
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
+  });
+
+  $('#defaultTimingForm')?.addEventListener('submit', async event => {
+    event.preventDefault();
+
+    const periods = Array.from({ length: PERIOD_COUNT }, (_, i) => ({
+      start: $(`#defaultStart${i}`).value,
+      end: $(`#defaultEnd${i}`).value
+    }));
+
+    try {
+      addTimingChange(data.timingHistory, '0000-00-00', periods);
+      await persist();
+      notify('Default period timings saved.');
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
+  });
+
+  $('#timingChangeForm')?.addEventListener('submit', async event => {
+    event.preventDefault();
+
+    const effectiveFrom = $('#timingDate').value.trim();
+    if (!validateBSDate(effectiveFrom)) {
+      notify('Enter a valid BS effective date.');
+      return;
+    }
+
+    const periods = Array.from({ length: PERIOD_COUNT }, (_, i) => ({
+      start: $(`#futureStart${i}`).value,
+      end: $(`#futureEnd${i}`).value
+    }));
+
+    try {
+      addTimingChange(data.timingHistory, effectiveFrom, periods);
+      await persist();
+      notify('New timing schedule saved.');
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
+  });
+
+  $('#counterDate')?.addEventListener('change', event => {
+    const value = event.target.value.trim();
+    if (!validateBSDate(value)) {
+      notify('Enter a valid BS date.');
+      return;
+    }
+
+    selectedBS = value;
+    render();
+  });
+
+  document.querySelectorAll('[data-replace]').forEach(button => {
+    button.onclick = () => {
+      const [section, period] = button.dataset.replace.split(':');
+      openReplacement(section, Number(period));
+    };
+  });
+
+  document.querySelectorAll('[data-delete-record]').forEach(button => {
+    button.onclick = async () => {
+      if (!confirm('Undo this replacement entry?')) return;
+      data.records = data.records.filter(r => r.id !== button.dataset.deleteRecord);
+      await persist();
+      render();
+    };
+  });
+
+  $('#printReport')?.addEventListener('click', () => window.print());
+
+  $('#exportBackup')?.addEventListener('click', () => {
+    const blob = new Blob([createBackup(data)], { type: 'application/json' });
+    downloadFile('rrc-backup.json', blob);
+  });
+
+  $('#restoreFile')?.addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const restored = restoreBackup(await file.text());
+      data = restored;
+      initialiseData();
+      await persist();
+      notify('Backup restored successfully.');
+      render();
+    } catch (error) {
+      notify(`Could not restore backup: ${error.message}`);
+    }
+  });
+}
+
+function downloadFile(name, blob) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function start() {
+  data = await loadData();
+  initialiseData();
+  await persist();
   render();
-}).catch(error => {
-  console.error("RRC initialization failed:", error);
+}
+
+start().catch(error => {
+  console.error('RRC startup error:', error);
+  document.querySelector('#app').innerHTML = `
+    <main class="panel">
+      <h2>RRC could not start</h2>
+      <p>${esc(error.message)}</p>
+      <p class="muted">Please share the browser console error before clearing any app data.</p>
+    </main>
+  `;
 });
