@@ -9,17 +9,24 @@ export const WEEKDAYS = [
 
 export const PERIOD_COUNT = 9;
 
-export const SECTIONS = [
+export const DEFAULT_SECTIONS = [
   ...Array.from({ length: 12 }, (_, i) => `XI M${i + 1}`),
   ...Array.from({ length: 10 }, (_, i) => `XII M${i + 1}`)
 ];
 
-export const LAB_SUBJECTS = [
-  'Physics Lab',
-  'Chemistry Lab',
-  'Biology Lab',
-  'Computer Lab'
-];
+// Live section list: can be changed by the app without rebuilding.
+export let SECTIONS = [...DEFAULT_SECTIONS];
+
+export function setSections(sections) {
+  const cleaned = [...new Set(
+    (sections || [])
+      .map(s => String(s || '').trim())
+      .filter(Boolean)
+  )];
+
+  SECTIONS = cleaned;
+  return SECTIONS;
+}
 
 function emptyPeriod() {
   return {
@@ -42,10 +49,7 @@ function emptySection() {
 
 function emptyDay() {
   return Object.fromEntries(
-    SECTIONS.map(section => [
-      section,
-      emptySection()
-    ])
+    SECTIONS.map(section => [section, emptySection()])
   );
 }
 
@@ -72,6 +76,35 @@ export function getRoutineForDate(routine, bsDate, weekday) {
   }
 
   return getWeekdayRoutine(routine, weekday);
+}
+
+export function ensureRoutineSections(routine) {
+  if (!routine.weekdays) routine.weekdays = {};
+  if (!routine.specialDates) routine.specialDates = {};
+
+  for (const day of WEEKDAYS) {
+    if (!routine.weekdays[day]) routine.weekdays[day] = {};
+
+    for (const section of SECTIONS) {
+      if (!Array.isArray(routine.weekdays[day][section])) {
+        routine.weekdays[day][section] = emptySection();
+      } else {
+        while (routine.weekdays[day][section].length < PERIOD_COUNT) {
+          routine.weekdays[day][section].push(emptyPeriod());
+        }
+        routine.weekdays[day][section] =
+          routine.weekdays[day][section].slice(0, PERIOD_COUNT);
+      }
+    }
+
+    for (const section of Object.keys(routine.weekdays[day])) {
+      if (!SECTIONS.includes(section)) {
+        delete routine.weekdays[day][section];
+      }
+    }
+  }
+
+  return routine;
 }
 
 export function createSundayRoutine(routine, bsDate, sourceDay) {
@@ -110,13 +143,9 @@ export function updatePeriod(
   assignment,
   bsDate = null
 ) {
-  let sections;
-
-  if (weekday === 'Sunday') {
-    sections = routine?.specialDates?.[bsDate]?.sections;
-  } else {
-    sections = routine?.weekdays?.[weekday];
-  }
+  const sections = weekday === 'Sunday'
+    ? routine?.specialDates?.[bsDate]?.sections
+    : routine?.weekdays?.[weekday];
 
   if (!sections) {
     throw new Error('No timetable exists for this date.');
@@ -134,46 +163,35 @@ export function updatePeriod(
     throw new Error('Invalid period number.');
   }
 
-  const previous = sections[section][periodIndex];
-
-  const subjectChanged =
-    assignment.subjectId !== undefined &&
-    assignment.subjectId !== previous.subjectId;
+  const previous = sections[section]?.[periodIndex] || emptyPeriod();
 
   const updated = {
     ...previous,
     ...assignment,
-    isLab: Boolean(
-      assignment.isLab ?? previous.isLab
-    ),
+    isLab: Boolean(assignment.isLab ?? previous.isLab),
     labPeriods: Math.max(
       1,
-      Math.min(
-        2,
-        Number(
-          assignment.labPeriods ?? previous.labPeriods
-        ) || 1
-      )
+      Math.min(2, Number(assignment.labPeriods ?? previous.labPeriods) || 1)
     )
   };
 
-  if (subjectChanged) {
+  if (
+    assignment.subjectId !== undefined &&
+    assignment.subjectId !== previous.subjectId
+  ) {
     updated.teacherId = assignment.teacherId || '';
     updated.teacherInitials = assignment.teacherInitials || '';
     updated.teacherName = assignment.teacherName || '';
   }
 
   sections[section][periodIndex] = updated;
-
   return routine;
 }
 
 export function getTeacherAssignments(sections, teacherId) {
   const assignments = [];
 
-  if (!sections || !teacherId) {
-    return assignments;
-  }
+  if (!sections || !teacherId) return assignments;
 
   for (const section of SECTIONS) {
     const periods = sections[section] || [];
