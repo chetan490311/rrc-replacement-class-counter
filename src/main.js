@@ -17,7 +17,10 @@ import {
   ensureRoutineSections,
   createSundayRoutine,
   deleteSundayRoutine,
-  updatePeriod
+  updatePeriod,
+  assignPracticalSession,
+  clearPeriodAssignment,
+  getAssignmentTeachers
 } from './routine.js';
 
 import {
@@ -35,8 +38,7 @@ import {
 import {
   validateBSDate,
   todayBS,
-  getWeekdayFromBS,
-  bsToAd
+  getWeekdayFromBS
 } from './nepali-date.js';
 
 import {
@@ -45,7 +47,8 @@ import {
 } from './teacher-history.js';
 
 import {
-  createReplacementRecord
+  createReplacementRecord,
+  createPracticalReplacementRecords
 } from './replacements.js';
 
 let data;
@@ -77,6 +80,7 @@ function persist() {
 function refreshSections() {
   setSections(data.sections);
   ensureRoutineSections(data.masterRoutine);
+
   if (!data.sections.includes(selectedSection)) {
     selectedSection = data.sections[0] || '';
   }
@@ -110,7 +114,12 @@ function initialiseData() {
     }];
   }
 
-  // Create subject registrations from any existing teacher subject fields.
+  for (const subject of data.subjects) {
+    if (!Array.isArray(subject.teacherIds)) {
+      subject.teacherIds = [];
+    }
+  }
+
   for (const teacher of data.teachers) {
     if (!teacher.id) teacher.id = crypto.randomUUID();
 
@@ -127,6 +136,7 @@ function initialiseData() {
       const subject = data.subjects.find(
         item => item.name.toLowerCase() === teacher.subject.toLowerCase()
       );
+
       if (subject && !subject.teacherIds.includes(teacher.id)) {
         subject.teacherIds.push(teacher.id);
       }
@@ -167,6 +177,40 @@ function getAssignment(bsDate, section, period) {
 
 function getSubjectName(subjectId) {
   return data.subjects.find(item => item.id === subjectId)?.name || '';
+}
+
+function teacherSubjects(teacherId) {
+  return data.subjects.filter(subject =>
+    subject.teacherIds.includes(teacherId)
+  );
+}
+
+function practicalSubject(subject) {
+  const name = String(subject?.name || '').trim().toLowerCase();
+
+  return (
+    name === 'physics' ||
+    name === 'chemistry' ||
+    name === 'biology' ||
+    name.startsWith('computer') ||
+    name === 'ict' ||
+    name.includes('information technology')
+  );
+}
+
+function teacherNames(assignment) {
+  const teachers = getAssignmentTeachers(assignment);
+
+  if (!teachers.length) {
+    return assignment?.teacherInitials || assignment?.teacherName || 'Not assigned';
+  }
+
+  return teachers.map(teacher => {
+    const registered = data.teachers.find(item => item.id === teacher.id);
+    return registered
+      ? registered.initials
+      : teacher.initials || teacher.name || '';
+  }).filter(Boolean).join(', ');
 }
 
 function header() {
@@ -295,10 +339,6 @@ function teachersView() {
   `;
 }
 
-function teacherSubjects(teacherId) {
-  return data.subjects.filter(subject => subject.teacherIds.includes(teacherId));
-}
-
 function subjectsView() {
   return `
     ${hero('Subject management', 'Register subjects and select the teachers who teach each subject.')}
@@ -356,16 +396,19 @@ function routineView() {
           </select>
         </label>
       </div>
-      <p class="muted">Select a period cell to assign its subject and teacher.</p>
+      <p class="muted">Select a period cell to assign Theory or Practical.</p>
       <div class="period-grid">
         ${Array.from({ length: PERIOD_COUNT }, (_, i) => {
           const assignment = data.masterRoutine.weekdays[selectedDay]?.[selectedSection]?.[i];
+          const linked = assignment?.practicalSessionId && assignment.practicalPart === 2;
+
           return `
             <button class="period-card" data-edit-period="${i}">
               <b>Period ${i + 1}</b>
               <span>${esc(assignment?.subject || 'Not assigned')}</span>
-              <small>${esc(assignment?.teacherInitials || 'Choose teacher')}</small>
-              ${assignment?.isLab ? '<em>LAB</em>' : ''}
+              <small>${esc(teacherNames(assignment))}</small>
+              ${assignment?.isLab ? `<em>Practical${assignment.labPeriods === 2 ? ` · ${assignment.practicalPart}/2` : ''}</em>` : ''}
+              ${linked ? '<small>Linked to previous period</small>' : ''}
             </button>
           `;
         }).join('')}
@@ -504,8 +547,13 @@ function counterView() {
     for (const section of data.sections) {
       for (let i = 0; i < PERIOD_COUNT; i++) {
         const assignment = getAssignment(selectedBS, section, i + 1);
+
         if (assignment?.subject) {
-          entries.push({ section, period: i + 1, assignment });
+          entries.push({
+            section,
+            period: i + 1,
+            assignment
+          });
         }
       }
     }
@@ -531,14 +579,14 @@ function counterView() {
         <p class="muted">Choose the class being covered, then choose the replacement teacher.</p>
         <div class="tablewrap">
           <table>
-            <thead><tr><th>Section</th><th>Period</th><th>Subject</th><th>Scheduled teacher</th><th>Record</th></tr></thead>
+            <thead><tr><th>Section</th><th>Period</th><th>Subject</th><th>Scheduled teacher(s)</th><th>Record</th></tr></thead>
             <tbody>
               ${entries.map(item => `
                 <tr>
                   <td>${esc(item.section)}</td>
                   <td>${item.period}</td>
                   <td>${esc(item.assignment.subject)}</td>
-                  <td>${esc(item.assignment.teacherInitials || item.assignment.teacherName || '')}</td>
+                  <td>${esc(teacherNames(item.assignment))}</td>
                   <td><button class="primary small" data-replace="${esc(item.section)}:${item.period}">Replace</button></td>
                 </tr>
               `).join('')}
@@ -553,8 +601,8 @@ function counterView() {
       ${data.records.filter(r => r.dateBS === selectedBS).map(record => `
         <div class="record">
           <div>
-            <b>${esc(record.teacherInitials)} · ${esc(record.teacher)}</b>
-            <small>${esc(record.section)} · ${esc(record.subject)} · Period ${record.period} · ${record.periods} period(s)</small>
+            <b>${esc(record.initials || record.teacherInitials)} · ${esc(record.teacher)}</b>
+            <small>${esc(record.section)} · ${esc(record.subject)} · Period ${record.period} · ${record.periods || 1} period(s)</small>
           </div>
           <button class="danger small" data-delete-record="${record.id}">Undo</button>
         </div>
@@ -568,9 +616,10 @@ function reportsView() {
 
   for (const record of data.records) {
     const key = record.teacherId || record.teacher;
+
     if (!grouped.has(key)) {
       grouped.set(key, {
-        initials: record.teacherInitials || record.initials || '',
+        initials: record.initials || record.teacherInitials || '',
         name: record.teacher || record.teacherName || '',
         total: 0,
         dates: []
@@ -579,10 +628,15 @@ function reportsView() {
 
     const item = grouped.get(key);
     item.total += Number(record.periods || 1);
-    item.dates.push(`${record.dateBS} (${record.section}, P${record.period || 1})`);
+    item.dates.push(
+      `${record.dateBS} (${record.section}, P${record.period || 1})`
+    );
   }
 
-  const total = data.records.reduce((sum, r) => sum + Number(r.periods || 1), 0);
+  const total = data.records.reduce(
+    (sum, record) => sum + Number(record.periods || 1),
+    0
+  );
 
   return `
     ${hero('Replacement reports', 'Teacher-wise totals and dates of replacement classes.')}
@@ -623,132 +677,227 @@ function backupView() {
 
 function openPeriodEditor(index) {
   const periods = data.masterRoutine.weekdays[selectedDay]?.[selectedSection] || [];
-  const current = periods[index] || {};
+  const clicked = periods[index] || {};
+
+  // If the user clicks the second half of a practical, open its first period.
+  const startIndex = clicked.practicalSessionId
+    ? Math.max(0, Number(clicked.practicalStartPeriod || index + 1) - 1)
+    : index;
+
+  const current = periods[startIndex] || {};
+  const editingPractical = Boolean(current.isLab);
+
   const modal = document.createElement('dialog');
   modal.className = 'modal';
 
   modal.innerHTML = `
     <form method="dialog" class="modalbox" id="periodForm">
       <button class="close" value="cancel">×</button>
-      <h2>${esc(selectedSection)} · Period ${index + 1}</h2>
+      <h2>${esc(selectedSection)} · Period ${startIndex + 1}${current.labPeriods === 2 ? `–${startIndex + 2}` : ''}</h2>
+
+      <label>Class type
+        <select id="classType">
+          <option value="theory" ${!editingPractical ? 'selected' : ''}>Theory</option>
+          <option value="practical" ${editingPractical ? 'selected' : ''}>Practical</option>
+        </select>
+      </label>
+
+      <div id="periodCountWrap">
+        <label>Practical duration
+          <select id="practicalPeriods">
+            <option value="1" ${current.labPeriods !== 2 ? 'selected' : ''}>One period</option>
+            <option value="2" ${current.labPeriods === 2 ? 'selected' : ''}>Two consecutive periods</option>
+          </select>
+        </label>
+      </div>
+
       <label>Subject
         <select id="periodSubject">
           <option value="">Choose subject</option>
-          ${data.subjects.map(s => `
-            <option value="${s.id}" ${s.id === current.subjectId ? 'selected' : ''}>${esc(s.name)}</option>
-          `).join('')}
-          <option value="__lab_physics">Physics Lab</option>
-          <option value="__lab_chemistry">Chemistry Lab</option>
-          <option value="__lab_biology">Biology Lab</option>
-          <option value="__lab_computer">Computer Lab</option>
         </select>
       </label>
-      <label>Teacher
-        <select id="periodTeacher"><option value="">Choose subject first</option></select>
-      </label>
-      <label>Lab periods
-        <select id="labPeriods">
-          <option value="1">One period</option>
-          <option value="2" ${current.labPeriods === 2 ? 'selected' : ''}>Two consecutive periods</option>
-        </select>
-      </label>
+
+      <div id="teacherSelection"></div>
+
       <button class="primary" id="savePeriod">Save assignment</button>
-      <button type="button" class="danger" id="clearPeriod">Clear this period</button>
+      <button type="button" class="danger" id="clearPeriod">Clear assignment</button>
     </form>
   `;
 
   document.body.append(modal);
 
+  const typeSelect = modal.querySelector('#classType');
+  const durationWrap = modal.querySelector('#periodCountWrap');
+  const durationSelect = modal.querySelector('#practicalPeriods');
   const subjectSelect = modal.querySelector('#periodSubject');
-  const teacherSelect = modal.querySelector('#periodTeacher');
+  const teacherSelection = modal.querySelector('#teacherSelection');
 
-  function updateTeachers() {
-    const subjectId = subjectSelect.value;
-    let teachers = [];
+  function updateSubjectOptions() {
+    const type = typeSelect.value;
+    const eligible = data.subjects.filter(subject =>
+      type === 'practical' ? practicalSubject(subject) : true
+    );
 
-    if (subjectId.startsWith('__lab_')) {
-      const key = subjectId.replace('__lab_', '');
-      const search = key === 'computer' ? /computer|ict/i : new RegExp(key, 'i');
-      teachers = data.teachers.filter(t =>
-        teacherSubjects(t.id).some(s => search.test(s.name))
-      );
-    } else {
-      teachers = getTeachersForSubject(data.subjects, subjectId, data.teachers);
-    }
-
-    teacherSelect.innerHTML = `
-      <option value="">Choose teacher</option>
-      ${teachers.map(t => `
-        <option value="${t.id}" ${t.id === current.teacherId ? 'selected' : ''}>
-          ${esc(t.initials)} · ${esc(t.name)}
+    subjectSelect.innerHTML = `
+      <option value="">Choose subject</option>
+      ${eligible.map(subject => `
+        <option value="${subject.id}" ${subject.id === current.subjectId ? 'selected' : ''}>
+          ${esc(subject.name)}
         </option>
       `).join('')}
     `;
+
+    if (!eligible.some(subject => subject.id === current.subjectId)) {
+      subjectSelect.value = '';
+    }
+
+    durationWrap.style.display = type === 'practical' ? '' : 'none';
+    updateTeacherOptions();
   }
 
-  subjectSelect.addEventListener('change', updateTeachers);
-  updateTeachers();
+  function updateTeacherOptions() {
+    const subjectId = subjectSelect.value;
+    const teachers = getTeachersForSubject(
+      data.subjects,
+      subjectId,
+      data.teachers
+    );
+
+    if (typeSelect.value === 'theory') {
+      teacherSelection.innerHTML = `
+        <label>Teacher
+          <select id="periodTeacher">
+            <option value="">Choose registered teacher</option>
+            ${teachers.map(teacher => `
+              <option value="${teacher.id}" ${teacher.id === current.teacherId ? 'selected' : ''}>
+                ${esc(teacher.initials)} · ${esc(teacher.name)}
+              </option>
+            `).join('')}
+          </select>
+        </label>
+      `;
+    } else {
+      const selectedIds = new Set(
+        current.isLab ? getAssignmentTeachers(current).map(teacher => teacher.id) : []
+      );
+
+      teacherSelection.innerHTML = `
+        <fieldset class="teacher-check-list">
+          <legend>Select practical teacher(s)</legend>
+          ${teachers.map(teacher => `
+            <label class="check-row">
+              <input type="checkbox" name="practicalTeacher" value="${teacher.id}"
+                ${selectedIds.has(teacher.id) ? 'checked' : ''}>
+              ${esc(teacher.initials)} · ${esc(teacher.name)}
+            </label>
+          `).join('')}
+          ${teachers.length ? '' : '<p class="muted">No teachers are registered for this subject. Assign teachers in Subject Management first.</p>'}
+        </fieldset>
+      `;
+    }
+  }
+
+  typeSelect.addEventListener('change', () => {
+    updateSubjectOptions();
+  });
+
+  subjectSelect.addEventListener('change', updateTeacherOptions);
+
+  updateSubjectOptions();
 
   modal.querySelector('#savePeriod').addEventListener('click', async event => {
     event.preventDefault();
 
+    const type = typeSelect.value;
     const subjectId = subjectSelect.value;
-    const teacherId = teacherSelect.value;
+    const subject = data.subjects.find(item => item.id === subjectId);
 
-    if (!subjectId || !teacherId) {
-      notify('Choose a subject and its registered teacher.');
+    if (!subject) {
+      notify('Choose a registered subject.');
       return;
     }
 
-    const teacher = data.teachers.find(t => t.id === teacherId);
-    const lab = subjectId.startsWith('__lab_');
-    const subject = lab
-      ? subjectSelect.selectedOptions[0].textContent
-      : getSubjectName(subjectId);
+    try {
+      if (type === 'theory') {
+        const teacherId = modal.querySelector('#periodTeacher')?.value;
+        const teacher = data.teachers.find(item => item.id === teacherId);
 
-    updatePeriod(
-      data.masterRoutine,
-      selectedDay,
-      selectedSection,
-      index,
-      {
-        subjectId: lab ? '' : subjectId,
-        subject,
-        teacherId,
-        teacherInitials: teacher.initials,
-        teacherName: teacher.name,
-        isLab: lab,
-        labPeriods: Number(modal.querySelector('#labPeriods').value)
+        if (!teacher) {
+          notify('Choose a registered teacher for this theory class.');
+          return;
+        }
+
+        updatePeriod(
+          data.masterRoutine,
+          selectedDay,
+          selectedSection,
+          startIndex,
+          {
+            type: 'theory',
+            subjectId: subject.id,
+            subject: subject.name,
+            teacherId: teacher.id,
+            teacherInitials: teacher.initials,
+            teacherName: teacher.name,
+            isLab: false,
+            labPeriods: 1
+          }
+        );
+      } else {
+        const teacherIds = [
+          ...modal.querySelectorAll('input[name="practicalTeacher"]:checked')
+        ].map(input => input.value);
+
+        if (!teacherIds.length) {
+          notify('Select at least one practical teacher.');
+          return;
+        }
+
+        const teachers = teacherIds.map(id =>
+          data.teachers.find(teacher => teacher.id === id)
+        ).filter(Boolean);
+
+        assignPracticalSession(
+          data.masterRoutine,
+          selectedDay,
+          selectedSection,
+          startIndex,
+          {
+            type: 'practical',
+            subjectId: subject.id,
+            subject: subject.name,
+            teacherIds,
+            teachers
+          },
+          Number(durationSelect.value)
+        );
       }
-    );
 
-    await persist();
-    modal.close();
-    modal.remove();
-    render();
+      await persist();
+      modal.close();
+      modal.remove();
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
   });
 
   modal.querySelector('#clearPeriod').addEventListener('click', async () => {
-    updatePeriod(
-      data.masterRoutine,
-      selectedDay,
-      selectedSection,
-      index,
-      {
-        subjectId: '',
-        subject: '',
-        teacherId: '',
-        teacherInitials: '',
-        teacherName: '',
-        isLab: false,
-        labPeriods: 1
-      }
-    );
+    try {
+      clearPeriodAssignment(
+        data.masterRoutine,
+        selectedDay,
+        selectedSection,
+        startIndex
+      );
 
-    await persist();
-    modal.close();
-    modal.remove();
-    render();
+      await persist();
+      modal.close();
+      modal.remove();
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
   });
 
   modal.addEventListener('close', () => modal.remove());
@@ -766,58 +915,207 @@ function openReplacement(section, period) {
   const modal = document.createElement('dialog');
   modal.className = 'modal';
 
-  modal.innerHTML = `
-    <form method="dialog" class="modalbox">
-      <button class="close" value="cancel">×</button>
-      <h2>Record replacement</h2>
-      <p class="muted">${esc(section)} · Period ${period} · ${esc(assignment.subject)}</p>
-      <p>Scheduled teacher: <b>${esc(assignment.teacherName || assignment.teacherInitials)}</b></p>
-      <label>Replacement teacher
-        <select id="replacementTeacher">
-          <option value="">Choose teacher</option>
-          ${data.teachers.map(t => `
-            <option value="${t.id}">${esc(t.initials)} · ${esc(t.name)}</option>
-          `).join('')}
-        </select>
-      </label>
-      <button class="primary" id="saveReplacement">Save replacement</button>
-    </form>
-  `;
+  if (!assignment.isLab) {
+    modal.innerHTML = `
+      <form method="dialog" class="modalbox">
+        <button class="close" value="cancel">×</button>
+        <h2>Record theory replacement</h2>
+        <p class="muted">${esc(section)} · Period ${period} · ${esc(assignment.subject)}</p>
+        <p>Scheduled teacher: <b>${esc(teacherNames(assignment))}</b></p>
+        <label>Replacement teacher
+          <select id="replacementTeacher">
+            <option value="">Choose teacher</option>
+            ${data.teachers.map(teacher => `
+              <option value="${teacher.id}">${esc(teacher.initials)} · ${esc(teacher.name)}</option>
+            `).join('')}
+          </select>
+        </label>
+        <button class="primary" id="saveReplacement">Save replacement</button>
+      </form>
+    `;
 
-  document.body.append(modal);
+    document.body.append(modal);
 
-  modal.querySelector('#saveReplacement').addEventListener('click', async event => {
-    event.preventDefault();
+    modal.querySelector('#saveReplacement').addEventListener('click', async event => {
+      event.preventDefault();
 
-    const teacherId = modal.querySelector('#replacementTeacher').value;
-    const teacher = data.teachers.find(t => t.id === teacherId);
+      const teacherId = modal.querySelector('#replacementTeacher').value;
+      const teacher = data.teachers.find(item => item.id === teacherId);
 
-    if (!teacher) {
-      notify('Choose the replacement teacher.');
-      return;
-    }
+      if (!teacher) {
+        notify('Choose the replacement teacher.');
+        return;
+      }
 
-    try {
-      const record = createReplacementRecord({
-        masterRoutine: data.masterRoutine,
-        teacherHistory: data.teacherHistory,
-        bsDate: selectedBS,
-        section,
-        period,
-        replacementTeacher: teacher,
-        periods: 1
-      });
+      if (data.records.some(record =>
+        record.dateBS === selectedBS &&
+        record.section === section &&
+        Number(record.period) === period
+      )) {
+        notify('A replacement has already been recorded for this period. Undo it first if you need to change it.');
+        return;
+      }
 
-      data.records.push(record);
-      await persist();
+      try {
+        const record = createReplacementRecord({
+          masterRoutine: data.masterRoutine,
+          teacherHistory: data.teacherHistory,
+          bsDate: selectedBS,
+          section,
+          period,
+          replacementTeacher: teacher,
+          periods: 1
+        });
 
-      modal.close();
-      modal.remove();
-      render();
-    } catch (error) {
-      notify(error.message);
-    }
-  });
+        data.records.push(record);
+        await persist();
+
+        modal.close();
+        modal.remove();
+        render();
+      } catch (error) {
+        notify(error.message);
+      }
+    });
+  } else {
+    const sessionLength = Math.max(
+      1,
+      Math.min(2, Number(assignment.labPeriods) || 1)
+    );
+
+    const startPeriod = Number(
+      assignment.practicalStartPeriod || period
+    );
+
+    const sessionPeriods = Array.from(
+      { length: sessionLength },
+      (_, index) => startPeriod + index
+    );
+
+    const originalTeachers = getAssignmentTeachers(assignment);
+
+    modal.innerHTML = `
+      <form method="dialog" class="modalbox">
+        <button class="close" value="cancel">×</button>
+        <h2>Practical replacement</h2>
+        <p class="muted">${esc(section)} · ${esc(assignment.subject)} · Period${sessionLength === 2 ? 's' : ''} ${sessionPeriods.join(' and ')}</p>
+
+        <label>Original practical teacher being replaced
+          <select id="originalPracticalTeacher">
+            <option value="">Choose original teacher</option>
+            ${originalTeachers.map(teacher => {
+              const registered = data.teachers.find(item => item.id === teacher.id);
+              return `
+                <option value="${teacher.id}">
+                  ${esc(registered?.initials || teacher.initials || '')} ·
+                  ${esc(registered?.name || teacher.name || '')}
+                </option>
+              `;
+            }).join('')}
+          </select>
+        </label>
+
+        <p><b>Select the period(s) to replace:</b></p>
+        ${sessionPeriods.map((sessionPeriod, index) => `
+          <div class="practical-replacement-row">
+            <label class="check-row">
+              <input type="checkbox" class="replacement-period-check"
+                data-period="${sessionPeriod}"
+                ${sessionPeriod === period ? 'checked' : ''}>
+              Period ${sessionPeriod}
+            </label>
+            <label>Replacement teacher
+              <select class="period-replacement-teacher" data-period="${sessionPeriod}">
+                <option value="">Choose teacher</option>
+                ${data.teachers.map(teacher => `
+                  <option value="${teacher.id}">
+                    ${esc(teacher.initials)} · ${esc(teacher.name)}
+                  </option>
+                `).join('')}
+              </select>
+            </label>
+          </div>
+        `).join('')}
+
+        <button class="primary" id="savePracticalReplacement">Save practical replacement</button>
+      </form>
+    `;
+
+    document.body.append(modal);
+
+    modal.querySelector('#savePracticalReplacement').addEventListener('click', async event => {
+      event.preventDefault();
+
+      const originalTeacherId = modal.querySelector('#originalPracticalTeacher').value;
+
+      if (!originalTeacherId) {
+        notify('Choose the original practical teacher being replaced.');
+        return;
+      }
+
+      const selectedPeriods = [
+        ...modal.querySelectorAll('.replacement-period-check:checked')
+      ];
+
+      if (!selectedPeriods.length) {
+        notify('Select at least one period to replace.');
+        return;
+      }
+
+      const replacements = [];
+
+      for (const checkbox of selectedPeriods) {
+        const selectedPeriod = Number(checkbox.dataset.period);
+        const teacherId = modal.querySelector(
+          `.period-replacement-teacher[data-period="${selectedPeriod}"]`
+        ).value;
+
+        const replacementTeacher = data.teachers.find(
+          teacher => teacher.id === teacherId
+        );
+
+        if (!replacementTeacher) {
+          notify(`Choose a replacement teacher for period ${selectedPeriod}.`);
+          return;
+        }
+
+        if (data.records.some(record =>
+          record.dateBS === selectedBS &&
+          record.section === section &&
+          Number(record.period) === selectedPeriod
+        )) {
+          notify(`A replacement has already been recorded for period ${selectedPeriod}. Undo it first if you need to change it.`);
+          return;
+        }
+
+        replacements.push({
+          period: selectedPeriod,
+          replacementTeacher
+        });
+      }
+
+      try {
+        const records = createPracticalReplacementRecords({
+          masterRoutine: data.masterRoutine,
+          teacherHistory: data.teacherHistory,
+          bsDate: selectedBS,
+          section,
+          period: startPeriod,
+          originalTeacherId,
+          replacements
+        });
+
+        data.records.push(...records);
+        await persist();
+
+        modal.close();
+        modal.remove();
+        render();
+      } catch (error) {
+        notify(error.message);
+      }
+    });
+  }
 
   modal.addEventListener('close', () => modal.remove());
   modal.showModal();
@@ -833,13 +1131,17 @@ function wire() {
   });
 
   const addSectionForm = $('#addSectionForm');
+
   if (addSectionForm) {
     addSectionForm.onsubmit = async event => {
       event.preventDefault();
       const name = $('#newSection').value.trim();
 
       if (!name) return;
-      if (data.sections.some(s => s.toLowerCase() === name.toLowerCase())) {
+
+      if (data.sections.some(section =>
+        section.toLowerCase() === name.toLowerCase()
+      )) {
         notify('That section already exists.');
         return;
       }
@@ -857,15 +1159,21 @@ function wire() {
       const newName = prompt('Enter the new section name:', oldName)?.trim();
 
       if (!newName || newName === oldName) return;
-      if (data.sections.some(s => s.toLowerCase() === newName.toLowerCase())) {
+
+      if (data.sections.some(section =>
+        section.toLowerCase() === newName.toLowerCase()
+      )) {
         notify('That section name already exists.');
         return;
       }
 
-      data.sections = data.sections.map(s => s === oldName ? newName : s);
+      data.sections = data.sections.map(
+        section => section === oldName ? newName : section
+      );
 
       for (const day of WEEKDAYS) {
         const routine = data.masterRoutine.weekdays[day];
+
         if (routine?.[oldName]) {
           routine[newName] = routine[oldName];
           delete routine[oldName];
@@ -901,7 +1209,7 @@ function wire() {
         return;
       }
 
-      data.sections = data.sections.filter(s => s !== section);
+      data.sections = data.sections.filter(item => item !== section);
 
       for (const day of WEEKDAYS) {
         delete data.masterRoutine.weekdays[day]?.[section];
@@ -922,6 +1230,7 @@ function wire() {
   });
 
   const teacherForm = $('#teacherForm');
+
   if (teacherForm) {
     teacherForm.onsubmit = async event => {
       event.preventDefault();
@@ -939,7 +1248,9 @@ function wire() {
       };
 
       if (id) {
-        data.teachers = data.teachers.map(t => t.id === id ? teacher : t);
+        data.teachers = data.teachers.map(
+          item => item.id === id ? teacher : item
+        );
       } else {
         data.teachers.push(teacher);
       }
@@ -957,7 +1268,9 @@ function wire() {
 
   document.querySelectorAll('[data-edit-teacher]').forEach(button => {
     button.onclick = () => {
-      editingTeacher = data.teachers.find(t => t.id === button.dataset.editTeacher);
+      editingTeacher = data.teachers.find(
+        teacher => teacher.id === button.dataset.editTeacher
+      );
       render();
     };
   });
@@ -965,11 +1278,17 @@ function wire() {
   document.querySelectorAll('[data-delete-teacher]').forEach(button => {
     button.onclick = async () => {
       const id = button.dataset.deleteTeacher;
-      if (!confirm('Delete this teacher from the directory? Historical records will remain.')) return;
 
-      data.teachers = data.teachers.filter(t => t.id !== id);
-      data.subjects.forEach(s => {
-        s.teacherIds = s.teacherIds.filter(teacherId => teacherId !== id);
+      if (!confirm('Delete this teacher from the directory? Historical records will remain.')) {
+        return;
+      }
+
+      data.teachers = data.teachers.filter(teacher => teacher.id !== id);
+
+      data.subjects.forEach(subject => {
+        subject.teacherIds = subject.teacherIds.filter(
+          teacherId => teacherId !== id
+        );
       });
 
       await persist();
@@ -978,9 +1297,11 @@ function wire() {
   });
 
   const subjectForm = $('#subjectForm');
+
   if (subjectForm) {
     subjectForm.onsubmit = async event => {
       event.preventDefault();
+
       try {
         addSubject(data.subjects, $('#subjectName').value);
         await persist();
@@ -994,8 +1315,14 @@ function wire() {
   document.querySelectorAll('[data-subject-teacher]').forEach(select => {
     select.onchange = async () => {
       if (!select.value) return;
+
       try {
-        assignTeacherToSubject(data.subjects, select.dataset.subjectTeacher, select.value);
+        assignTeacherToSubject(
+          data.subjects,
+          select.dataset.subjectTeacher,
+          select.value
+        );
+
         await persist();
         render();
       } catch (error) {
@@ -1007,7 +1334,13 @@ function wire() {
   document.querySelectorAll('[data-unassign]').forEach(button => {
     button.onclick = async () => {
       const [subjectId, teacherId] = button.dataset.unassign.split(':');
-      removeTeacherFromSubject(data.subjects, subjectId, teacherId);
+
+      removeTeacherFromSubject(
+        data.subjects,
+        subjectId,
+        teacherId
+      );
+
       await persist();
       render();
     };
@@ -1024,7 +1357,9 @@ function wire() {
   });
 
   document.querySelectorAll('[data-edit-period]').forEach(button => {
-    button.onclick = () => openPeriodEditor(Number(button.dataset.editPeriod));
+    button.onclick = () => {
+      openPeriodEditor(Number(button.dataset.editPeriod));
+    };
   });
 
   $('#sundayForm')?.addEventListener('submit', async event => {
@@ -1039,7 +1374,12 @@ function wire() {
     }
 
     try {
-      createSundayRoutine(data.masterRoutine, date, $('#sundaySource').value);
+      createSundayRoutine(
+        data.masterRoutine,
+        date,
+        $('#sundaySource').value
+      );
+
       await persist();
       render();
     } catch (error) {
@@ -1050,7 +1390,11 @@ function wire() {
   document.querySelectorAll('[data-delete-sunday]').forEach(button => {
     button.onclick = async () => {
       const date = button.dataset.deleteSunday;
-      if (!confirm(`Delete the special routine for BS ${date}?`)) return;
+
+      if (!confirm(`Delete the special routine for BS ${date}?`)) {
+        return;
+      }
+
       deleteSundayRoutine(data.masterRoutine, date);
       await persist();
       render();
@@ -1070,7 +1414,10 @@ function wire() {
 
     const section = $('#changeSection').value;
     const period = Number($('#changePeriod').value);
-    const teacher = data.teachers.find(t => t.id === $('#changeTeacher').value);
+    const teacher = data.teachers.find(
+      item => item.id === $('#changeTeacher').value
+    );
+
     const original = getAssignment(effectiveFrom, section, period);
 
     if (!original?.subject) {
@@ -1124,6 +1471,7 @@ function wire() {
     event.preventDefault();
 
     const effectiveFrom = $('#timingDate').value.trim();
+
     if (!validateBSDate(effectiveFrom)) {
       notify('Enter a valid BS effective date.');
       return;
@@ -1146,6 +1494,7 @@ function wire() {
 
   $('#counterDate')?.addEventListener('change', event => {
     const value = event.target.value.trim();
+
     if (!validateBSDate(value)) {
       notify('Enter a valid BS date.');
       return;
@@ -1165,21 +1514,32 @@ function wire() {
   document.querySelectorAll('[data-delete-record]').forEach(button => {
     button.onclick = async () => {
       if (!confirm('Undo this replacement entry?')) return;
-      data.records = data.records.filter(r => r.id !== button.dataset.deleteRecord);
+
+      data.records = data.records.filter(
+        record => record.id !== button.dataset.deleteRecord
+      );
+
       await persist();
       render();
     };
   });
 
-  $('#printReport')?.addEventListener('click', () => window.print());
+  $('#printReport')?.addEventListener('click', () => {
+    window.print();
+  });
 
   $('#exportBackup')?.addEventListener('click', () => {
-    const blob = new Blob([createBackup(data)], { type: 'application/json' });
+    const blob = new Blob(
+      [createBackup(data)],
+      { type: 'application/json' }
+    );
+
     downloadFile('rrc-backup.json', blob);
   });
 
   $('#restoreFile')?.addEventListener('change', async event => {
     const file = event.target.files?.[0];
+
     if (!file) return;
 
     try {
@@ -1187,6 +1547,7 @@ function wire() {
       data = restored;
       initialiseData();
       await persist();
+
       notify('Backup restored successfully.');
       render();
     } catch (error) {
@@ -1198,9 +1559,11 @@ function wire() {
 function downloadFile(name, blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
+
   link.href = url;
   link.download = name;
   link.click();
+
   URL.revokeObjectURL(url);
 }
 
@@ -1213,6 +1576,7 @@ async function start() {
 
 start().catch(error => {
   console.error('RRC startup error:', error);
+
   document.querySelector('#app').innerHTML = `
     <main class="panel">
       <h2>RRC could not start</h2>
