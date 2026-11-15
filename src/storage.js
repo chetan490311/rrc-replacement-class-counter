@@ -1,69 +1,131 @@
 
-export function createSubject(name) {
-  const cleanName = String(name || '').trim();
+import { Preferences } from '@capacitor/preferences';
+import {
+  createEmptyRoutine,
+  PERIOD_COUNT
+} from './routine.js';
 
-  if (!cleanName) {
-    throw new Error('Enter a subject name.');
-  }
+export const STORAGE_KEY = 'rrc-v1-data';
 
+function createDefaultTimingHistory() {
+  return [
+    {
+      effectiveFrom: '0000-00-00',
+      periods: Array.from({ length: PERIOD_COUNT }, (_, index) => ({
+        period: index + 1,
+        start: '',
+        end: ''
+      }))
+    }
+  ];
+}
+
+export function createDefaultData() {
   return {
-    id: crypto.randomUUID(),
-    name: cleanName,
-    teacherIds: [],
-    createdAt: new Date().toISOString()
+    teachers: [],
+    subjects: [],
+    masterRoutine: createEmptyRoutine(),
+    teacherHistory: [],
+    timingHistory: createDefaultTimingHistory(),
+    records: [],
+    school: 'KMC',
+    department: '',
+    lastImport: null,
+    legacyRoutine: null,
+    dataVersion: 3
   };
 }
 
-export function addSubject(subjects, name) {
-  const cleanName = String(name || '').trim();
+export function migrateData(oldData = {}) {
+  const defaults = createDefaultData();
+  const migrated = { ...defaults, ...oldData };
 
-  const exists = subjects.some(
-    subject => subject.name.toLowerCase() === cleanName.toLowerCase()
-  );
+  migrated.records = Array.isArray(oldData.records)
+    ? oldData.records
+    : [];
 
-  if (exists) {
-    throw new Error('This subject already exists.');
+  migrated.teachers = Array.isArray(oldData.teachers)
+    ? oldData.teachers
+    : [];
+
+  migrated.subjects = Array.isArray(oldData.subjects)
+    ? oldData.subjects
+    : [];
+
+  migrated.teacherHistory = Array.isArray(oldData.teacherHistory)
+    ? oldData.teacherHistory
+    : [];
+
+  migrated.timingHistory = Array.isArray(oldData.timingHistory)
+    ? oldData.timingHistory
+    : createDefaultTimingHistory();
+
+  if (
+    oldData.masterRoutine?.weekdays &&
+    oldData.masterRoutine?.specialDates
+  ) {
+    migrated.masterRoutine = oldData.masterRoutine;
+  } else if (
+    oldData.routine?.weekdays &&
+    oldData.routine?.specialDates
+  ) {
+    migrated.masterRoutine = oldData.routine;
+  } else {
+    migrated.legacyRoutine =
+      oldData.legacyRoutine || oldData.routine || null;
+
+    migrated.masterRoutine = createEmptyRoutine();
   }
 
-  subjects.push(createSubject(cleanName));
-  return subjects;
+  migrated.dataVersion = 3;
+
+  return migrated;
 }
 
-export function assignTeacherToSubject(subjects, subjectId, teacherId) {
-  const subject = subjects.find(item => item.id === subjectId);
+export async function loadData() {
+  const result = await Preferences.get({
+    key: STORAGE_KEY
+  });
 
-  if (!subject) throw new Error('Subject not found.');
-  if (!teacherId) throw new Error('Choose a teacher.');
-
-  if (!subject.teacherIds.includes(teacherId)) {
-    subject.teacherIds.push(teacherId);
+  if (!result.value) {
+    return createDefaultData();
   }
 
-  return subjects;
+  try {
+    const oldData = JSON.parse(result.value);
+    return migrateData(oldData);
+  } catch (error) {
+    console.error('Could not read saved RRC data:', error);
+
+    throw new Error(
+      'Your saved RRC data could not be read. Do not clear app storage.'
+    );
+  }
 }
 
-export function removeTeacherFromSubject(subjects, subjectId, teacherId) {
-  const subject = subjects.find(item => item.id === subjectId);
+export async function saveData(data) {
+  await Preferences.set({
+    key: STORAGE_KEY,
+    value: JSON.stringify(data)
+  });
 
-  if (!subject) throw new Error('Subject not found.');
-
-  subject.teacherIds = subject.teacherIds.filter(
-    id => id !== teacherId
-  );
-
-  return subjects;
+  return true;
 }
 
-export function getTeachersForSubject(subjects, subjectId, teachers) {
-  const subject = subjects.find(item => item.id === subjectId);
-
-  if (!subject) return [];
-
-  return teachers.filter(teacher =>
-    subject.teacherIds.includes(teacher.id)
-  );
+export function createBackup(data) {
+  return JSON.stringify(data, null, 2);
 }
 
-export function getSubjectById(subjects, subjectId) {
-  return subjects.find(item => item.id === subjectId) || null;
+export function restoreBackup(jsonText) {
+  const parsed = JSON.parse(jsonText);
+
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed)
+  ) {
+    throw new Error('Invalid RRC backup file.');
+  }
+
+  return migrateData(parsed);
 }
