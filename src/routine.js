@@ -23,6 +23,7 @@ export const LAB_SUBJECTS = [
 
 function emptyPeriod() {
   return {
+    subjectId: '',
     subject: '',
     teacherId: '',
     teacherInitials: '',
@@ -138,15 +139,34 @@ export function updatePeriod(
 
   const previous = sections[section][periodIndex];
 
-  sections[section][periodIndex] = {
+  const subjectChanged =
+    assignment.subjectId !== undefined &&
+    assignment.subjectId !== previous.subjectId;
+
+  const updated = {
     ...previous,
     ...assignment,
-    isLab: Boolean(assignment.isLab),
+    isLab: Boolean(
+      assignment.isLab ?? previous.isLab
+    ),
     labPeriods: Math.max(
       1,
-      Math.min(2, Number(assignment.labPeriods) || 1)
+      Math.min(
+        2,
+        Number(assignment.labPeriods ?? previous.labPeriods) || 1
+      )
     )
   };
+
+  // If the subject changes, don't accidentally retain
+  // the previous subject's teacher.
+  if (subjectChanged) {
+    updated.teacherId = assignment.teacherId || '';
+    updated.teacherInitials = assignment.teacherInitials || '';
+    updated.teacherName = assignment.teacherName || '';
+  }
+
+  sections[section][periodIndex] = updated;
 
   return routine;
 }
