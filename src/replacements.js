@@ -1,28 +1,16 @@
 
 import { validateBSDate } from './nepali-date.js';
-import { SECTIONS, PERIOD_COUNT } from './routine.js';
+import { SECTIONS, PERIOD_COUNT, getAssignmentTeachers } from './routine.js';
 import { getTeacherForDate } from './teacher-history.js';
 
-// Create a replacement record using the timetable valid on that BS date.
-export function createReplacementRecord({
-  masterRoutine,
-  teacherHistory,
-  bsDate,
-  section,
-  period,
-  replacementTeacher,
-  periods = 1
-}) {
-  // Validate and convert the selected BS date.
+function validateCommon({ bsDate, section, period }) {
   const dateInfo = validateBSDate(bsDate);
 
   if (!dateInfo) {
     throw new Error('Invalid BS date. Please check the date.');
   }
 
-  const weekday = dateInfo.weekday;
-
-  if (weekday === 'Saturday') {
+  if (dateInfo.weekday === 'Saturday') {
     throw new Error('Saturday is closed.');
   }
 
@@ -40,16 +28,24 @@ export function createReplacementRecord({
     throw new Error('Please select a valid period.');
   }
 
-  if (
-    !replacementTeacher?.id ||
-    !replacementTeacher?.name ||
-    !replacementTeacher?.initials
-  ) {
+  return { dateInfo, periodNumber };
+}
+
+function validateReplacementTeacher(teacher) {
+  if (!teacher?.id || !teacher?.name || !teacher?.initials) {
     throw new Error('Please select a registered replacement teacher.');
   }
+}
 
-  // Retrieve the teacher who was scheduled on the selected date.
-  const scheduledTeacher = getTeacherForDate(
+function getScheduledAssignment({
+  masterRoutine,
+  teacherHistory,
+  bsDate,
+  section,
+  periodNumber,
+  weekday
+}) {
+  const assignment = getTeacherForDate(
     masterRoutine,
     teacherHistory,
     bsDate,
@@ -58,11 +54,90 @@ export function createReplacementRecord({
     periodNumber
   );
 
-  if (!scheduledTeacher || !scheduledTeacher.subject) {
+  if (!assignment || !assignment.subject) {
     throw new Error(
       'No subject or timetable assignment exists for this period.'
     );
   }
+
+  return assignment;
+}
+
+function createRecord({
+  dateInfo,
+  bsDate,
+  section,
+  periodNumber,
+  replacementTeacher,
+  scheduledTeacher,
+  originalTeacherId,
+  sessionId = ''
+}) {
+  return {
+    id: crypto.randomUUID(),
+
+    dateBS: bsDate,
+    dateAD: dateInfo.ad,
+    weekday: dateInfo.weekday,
+
+    section,
+    period: periodNumber,
+    periods: 1,
+
+    teacherId: replacementTeacher.id,
+    teacher: replacementTeacher.name,
+    initials: replacementTeacher.initials,
+
+    subject: scheduledTeacher.subject,
+
+    assignedTeacherId: originalTeacherId ||
+      scheduledTeacher.teacherId ||
+      '',
+    assignedTeacher: scheduledTeacher.teachers?.find(
+      teacher => teacher.id === originalTeacherId
+    )?.name || scheduledTeacher.teacherName || '',
+    assignedTeacherInitials: scheduledTeacher.teachers?.find(
+      teacher => teacher.id === originalTeacherId
+    )?.initials || scheduledTeacher.teacherInitials || '',
+
+    type: scheduledTeacher.isLab ? 'Lab' : 'Section',
+    isLab: Boolean(scheduledTeacher.isLab),
+
+    practicalSessionId: sessionId,
+
+    createdAt: new Date().toISOString()
+  };
+}
+
+/**
+ * Existing single-period replacement function.
+ * Retained for compatibility with the current theory replacement screen.
+ */
+export function createReplacementRecord({
+  masterRoutine,
+  teacherHistory,
+  bsDate,
+  section,
+  period,
+  replacementTeacher,
+  periods = 1
+}) {
+  const { dateInfo, periodNumber } = validateCommon({
+    bsDate,
+    section,
+    period
+  });
+
+  validateReplacementTeacher(replacementTeacher);
+
+  const scheduledTeacher = getScheduledAssignment({
+    masterRoutine,
+    teacherHistory,
+    bsDate,
+    section,
+    periodNumber,
+    weekday: dateInfo.weekday
+  });
 
   const isLab = Boolean(scheduledTeacher.isLab);
   const periodCount = Number(periods);
@@ -79,41 +154,170 @@ export function createReplacementRecord({
     throw new Error('Only laboratory replacements can cover two periods.');
   }
 
-  if (periodCount === 2 && periodNumber === PERIOD_COUNT) {
+  if (
+    periodCount === 2 &&
+    periodNumber === PERIOD_COUNT
+  ) {
     throw new Error('There is no following period for a two-period lab.');
   }
 
-  // Preserve both teacher identities as they were on the entry date.
+  const sessionId = scheduledTeacher.practicalSessionId || '';
+
   return {
-    id: crypto.randomUUID(),
-
-    dateBS: bsDate,
-    dateAD: dateInfo.ad,
-    weekday,
-
-    section,
-    period: periodNumber,
-    periods: periodCount,
-
-    // Teacher receiving the replacement assignment.
-    teacherId: replacementTeacher.id,
-    teacher: replacementTeacher.name,
-    initials: replacementTeacher.initials,
-    subject: scheduledTeacher.subject,
-
-    // Original teacher whose scheduled class is being covered.
-    assignedTeacherId: scheduledTeacher.teacherId || '',
-    assignedTeacher: scheduledTeacher.teacherName || '',
-    assignedTeacherInitials: scheduledTeacher.teacherInitials || '',
-
-    type: isLab ? 'Lab' : 'Section',
-    isLab,
-
-    createdAt: new Date().toISOString()
+    ...createRecord({
+      dateInfo,
+      bsDate,
+      section,
+      periodNumber,
+      replacementTeacher,
+      scheduledTeacher,
+      originalTeacherId: scheduledTeacher.teacherId || '',
+      sessionId
+    }),
+    periods: periodCount
   };
 }
 
-// Add a validated replacement record to the existing records array.
+/**
+ * Creates one replacement record for every practical period covered.
+ *
+ * replacements format:
+ * [
+ *   { period: 1, replacementTeacher: teacherObject },
+ *   { period: 2, replacementTeacher: anotherTeacherObject }
+ * ]
+ *
+ * The same replacement teacher may be selected for both periods.
+ */
+export function createPracticalReplacementRecords({
+  masterRoutine,
+  teacherHistory,
+  bsDate,
+  section,
+  period,
+  originalTeacherId,
+  replacements
+}) {
+  const { dateInfo, periodNumber } = validateCommon({
+    bsDate,
+    section,
+    period
+  });
+
+  if (!originalTeacherId) {
+    throw new Error('Choose the practical teacher being replaced.');
+  }
+
+  if (!Array.isArray(replacements) || !replacements.length) {
+    throw new Error('Choose at least one practical period to replace.');
+  }
+
+  const startingAssignment = getScheduledAssignment({
+    masterRoutine,
+    teacherHistory,
+    bsDate,
+    section,
+    periodNumber,
+    weekday: dateInfo.weekday
+  });
+
+  if (!startingAssignment.isLab) {
+    throw new Error('This timetable assignment is not a practical.');
+  }
+
+  const sessionId = startingAssignment.practicalSessionId || '';
+
+  const assignedTeachers = getAssignmentTeachers(startingAssignment);
+  const originalTeacher = assignedTeachers.find(
+    teacher => teacher.id === originalTeacherId
+  );
+
+  if (!originalTeacher) {
+    throw new Error(
+      'The selected teacher is not assigned to this practical.'
+    );
+  }
+
+  const sessionLength = Math.max(
+    1,
+    Math.min(2, Number(startingAssignment.labPeriods) || 1)
+  );
+
+  const startPeriod = Number(
+    startingAssignment.practicalStartPeriod || periodNumber
+  );
+
+  const allowedPeriods = Array.from(
+    { length: sessionLength },
+    (_, index) => startPeriod + index
+  );
+
+  const usedPeriods = new Set();
+
+  const records = replacements.map(item => {
+    const selectedPeriod = Number(item.period);
+
+    if (!allowedPeriods.includes(selectedPeriod)) {
+      throw new Error(
+        `Period ${selectedPeriod} is not part of this practical session.`
+      );
+    }
+
+    if (usedPeriods.has(selectedPeriod)) {
+      throw new Error(
+        `Period ${selectedPeriod} has been selected more than once.`
+      );
+    }
+
+    usedPeriods.add(selectedPeriod);
+
+    const replacementTeacher = item.replacementTeacher;
+    validateReplacementTeacher(replacementTeacher);
+
+    const scheduledTeacher = getScheduledAssignment({
+      masterRoutine,
+      teacherHistory,
+      bsDate,
+      section,
+      periodNumber: selectedPeriod,
+      weekday: dateInfo.weekday
+    });
+
+    if (
+      !scheduledTeacher.isLab ||
+      (
+        sessionId &&
+        scheduledTeacher.practicalSessionId !== sessionId
+      )
+    ) {
+      throw new Error(
+        `Period ${selectedPeriod} does not belong to the same practical session.`
+      );
+    }
+
+    const periodTeachers = getAssignmentTeachers(scheduledTeacher);
+
+    if (!periodTeachers.some(teacher => teacher.id === originalTeacherId)) {
+      throw new Error(
+        `The selected original teacher is not assigned in period ${selectedPeriod}.`
+      );
+    }
+
+    return createRecord({
+      dateInfo,
+      bsDate,
+      section,
+      periodNumber: selectedPeriod,
+      replacementTeacher,
+      scheduledTeacher,
+      originalTeacherId,
+      sessionId
+    });
+  });
+
+  return records;
+}
+
 export function addReplacementRecord(data, details) {
   if (!data || !Array.isArray(data.records)) {
     throw new Error('Replacement data storage is not initialized.');
@@ -126,35 +330,39 @@ export function addReplacementRecord(data, details) {
   });
 
   data.records.push(record);
-
   return record;
 }
 
-// Get replacement records for a particular BS date.
 export function getReplacementsForBSDate(records, bsDate) {
-  return (records || []).filter(record => record.dateBS === bsDate);
+  return (records || []).filter(
+    record => record.dateBS === bsDate
+  );
 }
 
-// Get replacement records for a particular teacher.
 export function getReplacementsForTeacher(records, teacherId) {
   return (records || []).filter(
     record => record.teacherId === teacherId
   );
 }
 
-// Calculate the total replacement periods for a teacher.
 export function getTeacherReplacementTotal(records, teacherId) {
   return getReplacementsForTeacher(records, teacherId)
-    .reduce((total, record) => total + Number(record.periods || 1), 0);
+    .reduce(
+      (total, record) => total + Number(record.periods || 1),
+      0
+    );
 }
 
-// Calculate total replacement periods for a selected BS date.
 export function getDailyReplacementTotal(records, bsDate) {
   return getReplacementsForBSDate(records, bsDate)
-    .reduce((total, record) => total + Number(record.periods || 1), 0);
+    .reduce(
+      (total, record) => total + Number(record.periods || 1),
+      0
+    );
 }
 
-// Remove a replacement record by ID.
 export function deleteReplacementRecord(records, recordId) {
-  return (records || []).filter(record => record.id !== recordId);
+  return (records || []).filter(
+    record => record.id !== recordId
+  );
 }
