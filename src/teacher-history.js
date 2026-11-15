@@ -1,30 +1,65 @@
 
 import { SECTIONS, PERIOD_COUNT } from './routine.js';
 
-// Create a new teacher assignment history.
 export function createTeacherHistory() {
   return [];
 }
 
-// Record a teacher change for one section, period and weekday.
-// The change becomes effective from the specified BS date.
+function normalizeTeachers(change) {
+  if (Array.isArray(change.teachers) && change.teachers.length) {
+    return change.teachers;
+  }
+
+  if (Array.isArray(change.teacherIds) && change.teacherIds.length) {
+    return change.teacherIds.map(id => ({ id }));
+  }
+
+  if (change.teacherId) {
+    return [{
+      id: change.teacherId,
+      name: change.teacherName || '',
+      initials: change.teacherInitials || ''
+    }];
+  }
+
+  return [];
+}
+
+function applyTeachers(assignment, teachers, change) {
+  const teacherIds = teachers.map(teacher => teacher.id);
+
+  return {
+    ...assignment,
+    teacherIds,
+    teachers,
+
+    teacherId: teacherIds[0] || '',
+    teacherName: teachers[0]?.name || '',
+    teacherInitials: teachers[0]?.initials || '',
+
+    ...(change.subject ? { subject: change.subject } : {})
+  };
+}
+
 export function addTeacherChange(history, change) {
   const {
     effectiveFrom,
     weekday,
     section,
-    period,
-    teacherId,
-    teacherName,
-    teacherInitials,
-    subject
+    period
   } = change;
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom || '')) {
     throw new Error('Enter the effective BS date as YYYY-MM-DD.');
   }
 
-  if (!['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'].includes(weekday)) {
+  if (![
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday'
+  ].includes(weekday)) {
     throw new Error('Choose a valid weekday.');
   }
 
@@ -40,9 +75,14 @@ export function addTeacherChange(history, change) {
     throw new Error('Choose a valid period.');
   }
 
-  if (!teacherId || !teacherName || !teacherInitials) {
-    throw new Error('Select a registered teacher.');
+  const teachers = normalizeTeachers(change);
+
+  if (!teachers.length || teachers.some(teacher => !teacher.id)) {
+    throw new Error('Select at least one registered teacher.');
   }
+
+  // Keep the legacy single-teacher fields for compatibility.
+  const firstTeacher = teachers[0];
 
   const entry = {
     id: crypto.randomUUID(),
@@ -50,10 +90,15 @@ export function addTeacherChange(history, change) {
     weekday,
     section,
     period: Number(period),
-    teacherId,
-    teacherName,
-    teacherInitials,
-    subject: subject || '',
+
+    teacherIds: teachers.map(teacher => teacher.id),
+    teachers,
+
+    teacherId: firstTeacher.id,
+    teacherName: firstTeacher.name || '',
+    teacherInitials: firstTeacher.initials || '',
+
+    subject: change.subject || '',
     createdAt: new Date().toISOString()
   };
 
@@ -66,8 +111,6 @@ export function addTeacherChange(history, change) {
   return history;
 }
 
-// Find the teacher assigned to a particular period on a particular BS date.
-// If no historical change applies, use the original master routine.
 export function getTeacherForDate(
   masterRoutine,
   history,
@@ -93,11 +136,18 @@ export function getTeacherForDate(
   let original;
 
   if (weekday === 'Sunday') {
-    original =
-      masterRoutine?.specialDates?.[bsDate]?.sections?.[section]?.[periodIndex];
+    original = masterRoutine
+      ?.specialDates
+      ?.[bsDate]
+      ?.sections
+      ?.[section]
+      ?.[periodIndex];
   } else {
-    original =
-      masterRoutine?.weekdays?.[weekday]?.[section]?.[periodIndex];
+    original = masterRoutine
+      ?.weekdays
+      ?.[weekday]
+      ?.[section]
+      ?.[periodIndex];
   }
 
   if (!original) return null;
@@ -107,28 +157,27 @@ export function getTeacherForDate(
       change.effectiveFrom <= bsDate &&
       change.weekday === weekday &&
       change.section === section &&
-      change.period === period
+      change.period === Number(period)
     )
     .sort((a, b) =>
       b.effectiveFrom.localeCompare(a.effectiveFrom)
     );
 
-  if (applicableChanges.length === 0) {
+  if (!applicableChanges.length) {
     return { ...original };
   }
 
   const latest = applicableChanges[0];
+  const teachers = normalizeTeachers(latest);
 
-  return {
-    ...original,
-    teacherId: latest.teacherId,
-    teacherName: latest.teacherName,
-    teacherInitials: latest.teacherInitials,
-    subject: latest.subject || original.subject
-  };
+  // Old records contain only teacherId, teacherName and teacherInitials.
+  if (!teachers.length) {
+    return { ...original };
+  }
+
+  return applyTeachers(original, teachers, latest);
 }
 
-// List all teacher changes effective on or before a selected BS date.
 export function getChangesUntil(history, bsDate) {
   return (history || [])
     .filter(change => change.effectiveFrom <= bsDate)
@@ -137,7 +186,6 @@ export function getChangesUntil(history, bsDate) {
     );
 }
 
-// Get the complete history of changes for one section and period.
 export function getAssignmentHistory(
   history,
   weekday,
@@ -155,7 +203,8 @@ export function getAssignmentHistory(
     );
 }
 
-// Remove a mistakenly entered change by its ID.
 export function deleteTeacherChange(history, changeId) {
-  return (history || []).filter(change => change.id !== changeId);
+  return (history || []).filter(
+    change => change.id !== changeId
+  );
 }
