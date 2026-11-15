@@ -114,4 +114,8 @@ function wire(){
 }
 function wireRoutineSave(){const saveR=document.querySelector('#saveRoutine');if(saveR)saveR.onclick=()=>{const d=document.querySelector('#routineDay').value;const rows=data.routine[d]||[];document.querySelectorAll('[data-section]').forEach(i=>rows[Number(i.dataset.section)].section=i.value);document.querySelectorAll('[data-cell]').forEach(i=>{const [r,c]=i.dataset.cell.split(':').map(Number);rows[r].cells[c]=i.value});data.routine[d]=rows;save();alert(d+' routine saved.')}}
 function download(name,content,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([content],{type}));a.download=name;a.click();URL.revokeObjectURL(a.href)}
-await load();render();
+load().then(() => {
+  render();
+}).catch(error => {
+  console.error("RRC initialization failed:", error);
+});
