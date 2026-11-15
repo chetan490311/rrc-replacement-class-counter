@@ -34,16 +34,21 @@ function emptyPeriod() {
 }
 
 function emptySection() {
-  return Array.from({ length: PERIOD_COUNT }, emptyPeriod);
+  return Array.from(
+    { length: PERIOD_COUNT },
+    () => emptyPeriod()
+  );
 }
 
 function emptyDay() {
   return Object.fromEntries(
-    SECTIONS.map(section => [section, emptySection()])
+    SECTIONS.map(section => [
+      section,
+      emptySection()
+    ])
   );
 }
 
-// Creates a new master timetable.
 export function createEmptyRoutine() {
   return {
     weekdays: Object.fromEntries(
@@ -53,18 +58,14 @@ export function createEmptyRoutine() {
   };
 }
 
-// Makes a separate copy so editing a Sunday never changes its source day.
 export function copyRoutine(source) {
   return JSON.parse(JSON.stringify(source));
 }
 
-// Gets the timetable for a normal weekday.
 export function getWeekdayRoutine(routine, weekday) {
   return routine?.weekdays?.[weekday] || null;
 }
 
-// Gets the timetable for a particular BS date.
-// Sunday is closed unless a special timetable exists.
 export function getRoutineForDate(routine, bsDate, weekday) {
   if (weekday === 'Sunday') {
     return routine?.specialDates?.[bsDate]?.sections || null;
@@ -73,7 +74,6 @@ export function getRoutineForDate(routine, bsDate, weekday) {
   return getWeekdayRoutine(routine, weekday);
 }
 
-// Opens a particular Sunday by copying a weekday timetable.
 export function createSundayRoutine(routine, bsDate, sourceDay) {
   if (!routine || !routine.weekdays?.[sourceDay]) {
     throw new Error('Choose a valid weekday routine to copy.');
@@ -94,7 +94,6 @@ export function createSundayRoutine(routine, bsDate, sourceDay) {
   return routine;
 }
 
-// Deletes a special Sunday timetable.
 export function deleteSundayRoutine(routine, bsDate) {
   if (routine?.specialDates) {
     delete routine.specialDates[bsDate];
@@ -103,8 +102,6 @@ export function deleteSundayRoutine(routine, bsDate) {
   return routine;
 }
 
-// Updates one period in one section.
-// periodIndex starts at zero: 0 means Period 1.
 export function updatePeriod(
   routine,
   weekday,
@@ -153,13 +150,13 @@ export function updatePeriod(
       1,
       Math.min(
         2,
-        Number(assignment.labPeriods ?? previous.labPeriods) || 1
+        Number(
+          assignment.labPeriods ?? previous.labPeriods
+        ) || 1
       )
     )
   };
 
-  // If the subject changes, don't accidentally retain
-  // the previous subject's teacher.
   if (subjectChanged) {
     updated.teacherId = assignment.teacherId || '';
     updated.teacherInitials = assignment.teacherInitials || '';
@@ -171,21 +168,23 @@ export function updatePeriod(
   return routine;
 }
 
-// Returns all sections assigned to a teacher in a timetable.
 export function getTeacherAssignments(sections, teacherId) {
-  if (!sections || !teacherId) return [];
+  const assignments = [];
 
-  const results = [];
+  if (!sections || !teacherId) {
+    return assignments;
+  }
 
   for (const section of SECTIONS) {
     const periods = sections[section] || [];
 
     periods.forEach((assignment, index) => {
       if (assignment.teacherId === teacherId) {
-        results.push({
+        assignments.push({
           section,
           period: index + 1,
           subject: assignment.subject,
+          subjectId: assignment.subjectId,
           isLab: assignment.isLab,
           labPeriods: assignment.labPeriods
         });
@@ -193,12 +192,9 @@ export function getTeacherAssignments(sections, teacherId) {
     });
   }
 
-  return results;
+  return assignments;
 }
 
-// Returns the number of periods assigned to a section.
 export function getSectionPeriodCount(sections, section) {
-  return (sections?.[section] || []).filter(
-    period => period.subject || period.teacherId
-  ).length;
+  return sections?.[section]?.length || 0;
 }
