@@ -2,7 +2,8 @@
 import { Preferences } from '@capacitor/preferences';
 import {
   createEmptyRoutine,
-  PERIOD_COUNT
+  PERIOD_COUNT,
+  DEFAULT_SECTIONS
 } from './routine.js';
 
 export const STORAGE_KEY = 'rrc-v1-data';
@@ -27,7 +28,9 @@ export function createDefaultData() {
   return {
     teachers: [],
     subjects: [],
+    sections: [...DEFAULT_SECTIONS],
     masterRoutine: createEmptyRoutine(),
+    routineVersions: [],
     teacherHistory: [],
     timingHistory: createDefaultTimingHistory(),
     records: [],
@@ -35,12 +38,13 @@ export function createDefaultData() {
     department: '',
     lastImport: null,
     legacyRoutine: null,
-    dataVersion: 4
+    dataVersion: 5
   };
 }
 
 export function migrateData(oldData = {}) {
   const defaults = createDefaultData();
+
   const migrated = {
     ...defaults,
     ...oldData
@@ -56,6 +60,14 @@ export function migrateData(oldData = {}) {
 
   migrated.subjects = Array.isArray(oldData.subjects)
     ? oldData.subjects
+    : [];
+
+  migrated.sections = Array.isArray(oldData.sections)
+    ? oldData.sections
+    : [...DEFAULT_SECTIONS];
+
+  migrated.routineVersions = Array.isArray(oldData.routineVersions)
+    ? oldData.routineVersions
     : [];
 
   migrated.teacherHistory = Array.isArray(oldData.teacherHistory)
@@ -85,7 +97,7 @@ export function migrateData(oldData = {}) {
     migrated.masterRoutine = createEmptyRoutine();
   }
 
-  migrated.dataVersion = 4;
+  migrated.dataVersion = 5;
 
   return migrated;
 }
