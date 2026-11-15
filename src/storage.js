@@ -11,11 +11,14 @@ function createDefaultTimingHistory() {
   return [
     {
       effectiveFrom: '0000-00-00',
-      periods: Array.from({ length: PERIOD_COUNT }, (_, index) => ({
-        period: index + 1,
-        start: '',
-        end: ''
-      }))
+      periods: Array.from(
+        { length: PERIOD_COUNT },
+        (_, index) => ({
+          period: index + 1,
+          start: '',
+          end: ''
+        })
+      )
     }
   ];
 }
@@ -32,13 +35,16 @@ export function createDefaultData() {
     department: '',
     lastImport: null,
     legacyRoutine: null,
-    dataVersion: 3
+    dataVersion: 4
   };
 }
 
 export function migrateData(oldData = {}) {
   const defaults = createDefaultData();
-  const migrated = { ...defaults, ...oldData };
+  const migrated = {
+    ...defaults,
+    ...oldData
+  };
 
   migrated.records = Array.isArray(oldData.records)
     ? oldData.records
@@ -72,12 +78,14 @@ export function migrateData(oldData = {}) {
     migrated.masterRoutine = oldData.routine;
   } else {
     migrated.legacyRoutine =
-      oldData.legacyRoutine || oldData.routine || null;
+      oldData.legacyRoutine ||
+      oldData.routine ||
+      null;
 
     migrated.masterRoutine = createEmptyRoutine();
   }
 
-  migrated.dataVersion = 3;
+  migrated.dataVersion = 4;
 
   return migrated;
 }
@@ -92,10 +100,9 @@ export async function loadData() {
   }
 
   try {
-    const oldData = JSON.parse(result.value);
-    return migrateData(oldData);
+    return migrateData(JSON.parse(result.value));
   } catch (error) {
-    console.error('Could not read saved RRC data:', error);
+    console.error('Error loading RRC data:', error);
 
     throw new Error(
       'Your saved RRC data could not be read. Do not clear app storage.'
