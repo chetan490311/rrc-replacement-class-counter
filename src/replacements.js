@@ -3,6 +3,13 @@ import { validateBSDate } from './nepali-date.js';
 import { SECTIONS, PERIOD_COUNT, getAssignmentTeachers } from './routine.js';
 import { getTeacherForDate } from './teacher-history.js';
 
+export const REPLACEMENT_STATUSES = [
+  'Assigned',
+  'Conducted',
+  'Not conducted',
+  'Cancelled'
+];
+
 function validateCommon({ bsDate, section, period }) {
   const dateInfo = validateBSDate(bsDate);
 
@@ -104,6 +111,9 @@ function createRecord({
     isLab: Boolean(scheduledTeacher.isLab),
 
     practicalSessionId: sessionId,
+
+    // Every new replacement begins as assigned.
+    status: 'Assigned',
 
     createdAt: new Date().toISOString()
   };
@@ -314,6 +324,34 @@ export function createPracticalReplacementRecords({
       sessionId
     });
   });
+
+  return records;
+}
+
+/**
+ * Updates the completion status of one replacement record.
+ * Practical periods have separate records and separate statuses.
+ */
+export function updateReplacementStatus(records, recordId, status) {
+  if (!REPLACEMENT_STATUSES.includes(status)) {
+    throw new Error('Please select a valid replacement status.');
+  }
+
+  if (!Array.isArray(records)) {
+    throw new Error('Replacement records are not initialized.');
+  }
+
+  const index = records.findIndex(record => record.id === recordId);
+
+  if (index === -1) {
+    throw new Error('Replacement record could not be found.');
+  }
+
+  records[index] = {
+    ...records[index],
+    status,
+    statusUpdatedAt: new Date().toISOString()
+  };
 
   return records;
 }
