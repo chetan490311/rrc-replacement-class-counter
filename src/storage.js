@@ -8,6 +8,11 @@ import {
 
 export const STORAGE_KEY = 'rrc-v1-data';
 
+export const DATA_VERSION = 6;
+export const BACKUP_FORMAT_VERSION = 1;
+
+const BACKUP_APP_ID = 'RRC';
+
 function createDefaultTimingHistory() {
   return [
     {
@@ -29,19 +34,41 @@ export function createDefaultData() {
     teachers: [],
     subjects: [],
     sections: [...DEFAULT_SECTIONS],
+
     masterRoutine: createEmptyRoutine(),
     routineVersions: [],
+
     teacherHistory: [],
     timingHistory: createDefaultTimingHistory(),
+
     records: [],
+    dailyArchives: [],
+
     school: 'KMC',
     department: '',
+
     lastImport: null,
     legacyRoutine: null,
-    dataVersion: 5
+
+    dataVersion: DATA_VERSION
   };
 }
 
+/**
+ * Adds defaults to older records without removing historical information.
+ */
+function migrateReplacementRecords(records) {
+  if (!Array.isArray(records)) return [];
+
+  return records.map(record => ({
+    ...record,
+    status: record.status || 'Assigned'
+  }));
+}
+
+/**
+ * Migrates older RRC data into the current storage structure.
+ */
 export function migrateData(oldData = {}) {
   const defaults = createDefaultData();
 
@@ -50,9 +77,7 @@ export function migrateData(oldData = {}) {
     ...oldData
   };
 
-  migrated.records = Array.isArray(oldData.records)
-    ? oldData.records
-    : [];
+  migrated.records = migrateReplacementRecords(oldData.records);
 
   migrated.teachers = Array.isArray(oldData.teachers)
     ? oldData.teachers
@@ -78,6 +103,10 @@ export function migrateData(oldData = {}) {
     ? oldData.timingHistory
     : createDefaultTimingHistory();
 
+  migrated.dailyArchives = Array.isArray(oldData.dailyArchives)
+    ? oldData.dailyArchives
+    : [];
+
   if (
     oldData.masterRoutine?.weekdays &&
     oldData.masterRoutine?.specialDates
@@ -97,7 +126,7 @@ export function migrateData(oldData = {}) {
     migrated.masterRoutine = createEmptyRoutine();
   }
 
-  migrated.dataVersion = 5;
+  migrated.dataVersion = DATA_VERSION;
 
   return migrated;
 }
@@ -123,6 +152,8 @@ export async function loadData() {
 }
 
 export async function saveData(data) {
+  data.dataVersion = DATA_VERSION;
+
   await Preferences.set({
     key: STORAGE_KEY,
     value: JSON.stringify(data)
@@ -131,12 +162,38 @@ export async function saveData(data) {
   return true;
 }
 
+/**
+ * Creates a versioned complete backup.
+ *
+ * The original app data is kept inside the "data" property.
+ * This allows future versions to recognize the backup format.
+ */
 export function createBackup(data) {
-  return JSON.stringify(data, null, 2);
+  const backup = {
+    app: BACKUP_APP_ID,
+    backupFormatVersion: BACKUP_FORMAT_VERSION,
+    backupType: 'complete',
+    createdAt: new Date().toISOString(),
+    dataVersion: DATA_VERSION,
+    data: JSON.parse(JSON.stringify(data))
+  };
+
+  return JSON.stringify(backup, null, 2);
 }
 
+/**
+ * Reads both:
+ * 1. New versioned RRC backup files.
+ * 2. Older RRC backup files containing raw app data.
+ */
 export function restoreBackup(jsonText) {
-  const parsed = JSON.parse(jsonText);
+  let parsed;
+
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    throw new Error('The selected file is not valid JSON.');
+  }
 
   if (
     !parsed ||
@@ -146,5 +203,57 @@ export function restoreBackup(jsonText) {
     throw new Error('Invalid RRC backup file.');
   }
 
-  return migrateData(parsed);
+  let backupData;
+
+  if (parsed.app !== undefined || parsed.backupFormatVersion !== undefined) {
+    if (parsed.app !== BACKUP_APP_ID) {
+      throw new Error('This backup does not belong to RRC.');
+    }
+
+    if (
+      !Number.isInteger(parsed.backupFormatVersion) ||
+      parsed.backupFormatVersion < 1 ||
+      parsed.backupFormatVersion > BACKUP_FORMAT_VERSION
+    ) {
+      throw new Error(
+        'This backup format is not supported by this app version.'
+      );
+    }
+
+    if (parsed.backupType !== 'complete') {
+      throw new Error(
+        'This file is not a complete RRC backup.'
+      );
+    }
+
+    if (
+      !parsed.data ||
+      typeof parsed.data !== 'object' ||
+      Array.isArray(parsed.data)
+    ) {
+      throw new Error('The backup does not contain valid RRC data.');
+    }
+
+    backupData = parsed.data;
+  } else {
+    // Compatibility with backups created by earlier RRC versions.
+    backupData = parsed;
+  }
+
+  const recognizedFields = [
+    'records',
+    'teachers',
+    'subjects',
+    'masterRoutine',
+    'routine',
+    'sections'
+  ];
+
+  if (!recognizedFields.some(key =>
+    Object.prototype.hasOwnProperty.call(backupData, key)
+  )) {
+    throw new Error('The selected file does not contain RRC data.');
+  }
+
+  return migrateData(backupData);
 }
