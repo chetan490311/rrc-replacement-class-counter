@@ -46,8 +46,11 @@ import {
 } from './teacher-history.js';
 
 import {
+import {
   createReplacementRecord,
-  createPracticalReplacementRecords
+  createPracticalReplacementRecords,
+  REPLACEMENT_STATUSES,
+  updateReplacementStatus
 } from './replacements.js';
 
 import {
@@ -911,42 +914,82 @@ function counterView() {
     <section class="panel">
       <h2>Entries for this date</h2>
 
-      ${data.records.filter(r => r.dateBS === selectedBS).map(record => `
-        <div class="record">
-          <div>
-            <b>${esc(record.initials || record.teacherInitials)} · ${esc(record.teacher)}</b>
-            <small>
-              ${esc(record.section)} · ${esc(record.subject)}
-              · Period ${record.period}
-              · ${record.periods || 1} period(s)
-            </small>
-          </div>
-          <button class="danger small" data-delete-record="${record.id}">
-            Undo
-          </button>
-        </div>
-      `).join('') || '<p class="muted">No replacement entries for this date.</p>'}
+${data.records.filter(r => r.dateBS === selectedBS).map(record => `
+  <div class="record">
+    <div>
+      <b>${esc(record.initials || record.teacherInitials)} · ${esc(record.teacher)}</b>
+      <small>
+        ${esc(record.section)} · ${esc(record.subject)}
+        · Period ${record.period}
+        · ${record.periods || 1} period(s)
+        · Original teacher: ${esc(record.assignedTeacher || 'Not specified')}
+      </small>
+    </div>
+
+    <div class="actions">
+      <label>
+        Status
+        <select data-record-status="${record.id}">
+          ${REPLACEMENT_STATUSES.map(status => `
+            <option value="${status}"
+              ${(record.status || 'Assigned') === status ? 'selected' : ''}>
+              ${status}
+            </option>
+          `).join('')}
+        </select>
+      </label>
+
+      <button class="danger small" data-delete-record="${record.id}">
+        Undo
+      </button>
+    </div>
+  </div>
+`).join('') || '<p class="muted">No replacement entries for this date.</p>'}
     </section>
   `;
 }
 
+
 function reportsView() {
   const grouped = new Map();
 
+  const statusTotals = {
+    'Conducted': 0,
+    'Assigned': 0,
+    'Not conducted': 0,
+    'Cancelled': 0
+  };
+
   for (const record of data.records) {
     const key = record.teacherId || record.teacher;
+    const periods = Number(record.periods || 1);
+    const status = statusTotals.hasOwnProperty(record.status)
+      ? record.status
+      : 'Assigned';
+
+    statusTotals[status] += periods;
 
     if (!grouped.has(key)) {
       grouped.set(key, {
         initials: record.initials || record.teacherInitials || '',
         name: record.teacher || record.teacherName || '',
         total: 0,
+        conducted: 0,
+        assigned: 0,
+        notConducted: 0,
+        cancelled: 0,
         dates: []
       });
     }
 
     const item = grouped.get(key);
-    item.total += Number(record.periods || 1);
+    item.total += periods;
+
+    if (status === 'Conducted') item.conducted += periods;
+    if (status === 'Assigned') item.assigned += periods;
+    if (status === 'Not conducted') item.notConducted += periods;
+    if (status === 'Cancelled') item.cancelled += periods;
+
     item.dates.push(
       `${record.dateBS} (${record.section}, P${record.period || 1})`
     );
@@ -958,12 +1001,31 @@ function reportsView() {
   );
 
   return `
-    ${hero('Replacement reports', 'Teacher-wise totals and dates of replacement classes.')}
+    ${hero('Replacement reports', 'Teacher-wise totals and completion status of replacement classes.')}
 
     <section class="panel">
       <div class="total report-total">
         <b>${total}</b>
         <small>Total replacement periods</small>
+      </div>
+
+      <div class="grid">
+        <div class="total">
+          <b>${statusTotals['Conducted']}</b>
+          <small>Conducted</small>
+        </div>
+        <div class="total">
+          <b>${statusTotals['Assigned']}</b>
+          <small>Assigned</small>
+        </div>
+        <div class="total">
+          <b>${statusTotals['Not conducted']}</b>
+          <small>Not conducted</small>
+        </div>
+        <div class="total">
+          <b>${statusTotals['Cancelled']}</b>
+          <small>Cancelled</small>
+        </div>
       </div>
 
       <div class="tablewrap">
@@ -972,7 +1034,11 @@ function reportsView() {
             <tr>
               <th>Initials</th>
               <th>Teacher</th>
-              <th>Periods</th>
+              <th>Total</th>
+              <th>Conducted</th>
+              <th>Assigned</th>
+              <th>Not conducted</th>
+              <th>Cancelled</th>
               <th>Dates and sections</th>
             </tr>
           </thead>
@@ -982,6 +1048,10 @@ function reportsView() {
                 <td>${esc(item.initials)}</td>
                 <td>${esc(item.name)}</td>
                 <td>${item.total}</td>
+                <td>${item.conducted}</td>
+                <td>${item.assigned}</td>
+                <td>${item.notConducted}</td>
+                <td>${item.cancelled}</td>
                 <td>${esc(item.dates.join(', '))}</td>
               </tr>
             `).join('')}
@@ -995,6 +1065,7 @@ function reportsView() {
     </section>
   `;
 }
+
 
 function backupView() {
   return `
@@ -2053,6 +2124,22 @@ function wire() {
   });
 
   /* Replacement records */
+  document.querySelectorAll('[data-record-status]').forEach(select => {
+  select.addEventListener('change', async () => {
+    try {
+      updateReplacementStatus(
+        data.records,
+        select.dataset.recordStatus,
+        select.value
+      );
+
+      await persist();
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
+  });
+});
 
   document.querySelectorAll('[data-replace]').forEach(button => {
     button.onclick = () => {
