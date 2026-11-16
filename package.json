@@ -11,9 +11,11 @@
     "cap:sync": "cap sync android"
   },
   "dependencies": {
-    "@capacitor/android": "^7.4.3",
-    "@capacitor/core": "^7.4.3",
-    "@capacitor/preferences": "^7.0.2",
+"@capacitor/android": "^7.4.3",
+"@capacitor/core": "^7.4.3",
+"@capacitor/preferences": "^7.0.2",
+"@capacitor/filesystem": "^7.1.4",
+"@capacitor/share": "^7.0.2",
     "xlsx": "^0.18.5",
     "nepali-date-converter": "^3.4.2"
   },
