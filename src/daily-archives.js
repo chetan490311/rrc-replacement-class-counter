@@ -200,9 +200,11 @@ export function createDailyArchive(data, bsDate) {
 }
 
 /**
- * Saves a new daily archive without overwriting an existing date.
+ * Saves a daily archive.
+ * If an edited preview is supplied, it saves that preview instead of
+ * generating a fresh snapshot.
  */
-export function saveDailyArchive(data, bsDate) {
+export function saveDailyArchive(data, bsDate, archiveDraft = null) {
   if (!data || typeof data !== 'object') {
     throw new Error('RRC data is not initialized.');
   }
@@ -221,7 +223,20 @@ export function saveDailyArchive(data, bsDate) {
     );
   }
 
-  const archive = createDailyArchive(data, bsDate);
+  const archive = archiveDraft
+    ? clone(archiveDraft)
+    : createDailyArchive(data, bsDate);
+
+  if (
+    archive.dateBS !== bsDate ||
+    !archive.sections ||
+    typeof archive.sections !== 'object'
+  ) {
+    throw new Error('The daily archive preview is invalid.');
+  }
+
+  archive.createdAt = archive.createdAt || new Date().toISOString();
+  archive.updatedAt = null;
 
   data.dailyArchives.push(archive);
 
