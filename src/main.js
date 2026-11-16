@@ -60,10 +60,15 @@ import {
   updateRoutineVersion,
   deleteRoutineVersion
 } from './routine-versions.js';
+import {
+  createDailyArchive,
+  saveDailyArchive
+} from './daily-archives.js';
 
 let data;
 let tab = 'counter';
 let selectedBS = todayBS();
+let selectedArchiveBS = todayBS();
 let selectedDay = 'Monday';
 let selectedSection = '';
 let editingTeacher = null;
@@ -112,6 +117,9 @@ function initialiseData() {
   if (!Array.isArray(data.subjects)) data.subjects = [];
   if (!Array.isArray(data.teachers)) data.teachers = [];
   if (!Array.isArray(data.records)) data.records = [];
+  if (!Array.isArray(data.dailyArchives)) {
+  data.dailyArchives = [];
+}
   if (!Array.isArray(data.teacherHistory)) data.teacherHistory = [];
 
   initializeRoutineVersions(data);
@@ -270,6 +278,7 @@ function header() {
     ['changes', 'Teacher Changes'],
     ['timings', 'Period Timings'],
     ['reports', 'Reports'],
+    ['dailyArchive', 'Daily Archive'],
     ['backup', 'Backup']
   ];
 
@@ -319,8 +328,9 @@ function render() {
     routineVersions: routineVersionsView,
     changes: changesView,
     timings: timingsView,
-    reports: reportsView,
-    backup: backupView
+reports: reportsView,
+dailyArchive: dailyArchiveView,
+backup: backupView
   };
 
   $('#view').innerHTML = views[tab]();
@@ -1086,6 +1096,171 @@ function backupView() {
     </section>
   `;
 }
+
+function dailyArchiveView() {
+  const savedArchive = data.dailyArchives.find(
+    archive => archive.dateBS === selectedArchiveBS
+  );
+
+  let archive = savedArchive;
+  let archiveError = '';
+
+  if (!archive) {
+    try {
+      archive = createDailyArchive(data, selectedArchiveBS);
+    } catch (error) {
+      archiveError = error.message;
+    }
+  }
+
+  const sections = archive?.sections || {};
+
+  function assignmentText(assignment) {
+    if (!assignment?.subject) return 'No class assigned';
+
+    return `${esc(assignment.subject)} · ${esc(teacherNames(assignment))}`;
+  }
+
+  return `
+    ${hero(
+      'Daily actual routine archive',
+      'Preview and permanently save the actual timetable for every section on a selected BS date.'
+    )}
+
+    <section class="panel controls">
+      <label>Select BS date
+        <input
+          id="archiveDate"
+          value="${esc(selectedArchiveBS)}"
+          placeholder="YYYY-MM-DD"
+        >
+      </label>
+
+      <div class="date-info">
+        <b>${archive ? esc(archive.weekday) : 'Date information'}</b>
+        <small>${archive ? `AD ${esc(archive.dateAD)}` : 'Enter a valid BS date'}</small>
+      </div>
+    </section>
+
+    ${archiveError ? `
+      <section class="panel">
+        <p class="note">${esc(archiveError)}</p>
+      </section>
+    ` : ''}
+
+    ${archive ? `
+      <section class="panel">
+        <div class="record">
+          <div>
+            <b>
+              ${savedArchive ? 'Saved daily snapshot' : 'Preview — not yet saved'}
+            </b>
+            <small>
+              BS ${esc(archive.dateBS)} · ${esc(archive.weekday)}
+              ${savedArchive
+                ? ` · Saved ${new Date(archive.createdAt).toLocaleString()}`
+                : ''}
+            </small>
+          </div>
+
+          ${savedArchive
+            ? '<span class="badge">Archived</span>'
+            : '<button class="primary" id="saveDailyArchive">Save actual routine</button>'}
+        </div>
+
+        <p class="muted">
+          ${savedArchive
+            ? 'This is a stored snapshot. Later master routine or timing changes will not alter it.'
+            : 'Review the timetable below before saving. The preview does not modify your master routine.'}
+        </p>
+      </section>
+
+      ${Object.entries(sections).map(([section, periods]) => `
+        <section class="panel">
+          <h2>${esc(section)}</h2>
+
+          <div class="tablewrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Period</th>
+                  <th>Time</th>
+                  <th>Subject</th>
+                  <th>Scheduled teacher(s)</th>
+                  <th>Actual teacher(s)</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                ${periods.map(item => `
+                  <tr>
+                    <td>
+                      ${item.period}
+                      ${item.actualAssignment?.isLab
+                        ? '<small>Practical</small>'
+                        : ''}
+                    </td>
+
+                    <td>
+                      ${item.timing?.start && item.timing?.end
+                        ? `${esc(item.timing.start)}–${esc(item.timing.end)}`
+                        : '—'}
+                    </td>
+
+                    <td>
+                      ${esc(
+                        item.actualAssignment?.subject ||
+                        item.scheduledAssignment?.subject ||
+                        '—'
+                      )}
+                    </td>
+
+                    <td>
+                      ${esc(teacherNames(item.scheduledAssignment))}
+                    </td>
+
+                    <td>
+                      <b>${esc(teacherNames(item.actualAssignment))}</b>
+
+                      ${item.replacements?.length
+                        ? item.replacements.map(replacement => `
+                            <small>
+                              Replaced ${esc(replacement.originalTeacher || 'original teacher')}
+                              with ${esc(replacement.replacementTeacher)}
+                            </small>
+                          `).join('')
+                        : ''}
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      `).join('')}
+    ` : ''}
+
+    <section class="panel">
+      <h2>Previously saved daily archives (${data.dailyArchives.length})</h2>
+
+      ${data.dailyArchives.slice().sort(
+        (a, b) => b.dateBS.localeCompare(a.dateBS)
+      ).map(item => `
+        <div class="record">
+          <div>
+            <b>BS ${esc(item.dateBS)} · ${esc(item.weekday)}</b>
+            <small>AD ${esc(item.dateAD)}</small>
+          </div>
+
+          <button class="small" data-open-archive="${esc(item.dateBS)}">
+            View archive
+          </button>
+        </div>
+      `).join('') || '<p class="muted">No daily archives saved yet.</p>'}
+    </section>
+  `;
+}
+
 
 /* -------------------------------------------------------
    PERIOD EDITOR
@@ -2120,6 +2295,45 @@ function wire() {
 
     selectedBS = value;
     render();
+  });
+   
+  /* Daily archive */
+
+  $('#archiveDate')?.addEventListener('change', event => {
+    const value = event.target.value.trim();
+
+    if (!validateBSDate(value)) {
+      notify('Enter a valid BS date.');
+      return;
+    }
+
+    selectedArchiveBS = value;
+    render();
+  });
+
+  $('#saveDailyArchive')?.addEventListener('click', async () => {
+    if (!confirm(
+      `Save the actual routine for BS ${selectedArchiveBS}? This will create a permanent daily snapshot.`
+    )) {
+      return;
+    }
+
+    try {
+      saveDailyArchive(data, selectedArchiveBS);
+      await persist();
+
+      notify('Daily actual routine archived successfully.');
+      render();
+    } catch (error) {
+      notify(error.message);
+    }
+  });
+
+  document.querySelectorAll('[data-open-archive]').forEach(button => {
+    button.addEventListener('click', () => {
+      selectedArchiveBS = button.dataset.openArchive;
+      render();
+    });
   });
 
   /* Replacement records */
