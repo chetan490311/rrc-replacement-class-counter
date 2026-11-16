@@ -69,6 +69,7 @@ let data;
 let tab = 'counter';
 let selectedBS = todayBS();
 let selectedArchiveBS = todayBS();
+let archiveDraft = null;
 let selectedDay = 'Monday';
 let selectedSection = '';
 let editingTeacher = null;
@@ -1097,6 +1098,7 @@ function backupView() {
   `;
 }
 
+
 function dailyArchiveView() {
   const savedArchive = data.dailyArchives.find(
     archive => archive.dateBS === selectedArchiveBS
@@ -1106,25 +1108,40 @@ function dailyArchiveView() {
   let archiveError = '';
 
   if (!archive) {
-    try {
-      archive = createDailyArchive(data, selectedArchiveBS);
-    } catch (error) {
-      archiveError = error.message;
+    if (archiveDraft?.dateBS === selectedArchiveBS) {
+      archive = archiveDraft;
+    } else {
+      try {
+        archiveDraft = createDailyArchive(data, selectedArchiveBS);
+        archive = archiveDraft;
+      } catch (error) {
+        archiveError = error.message;
+        archiveDraft = null;
+      }
     }
+  } else {
+    archiveDraft = null;
   }
 
   const sections = archive?.sections || {};
 
-  function assignmentText(assignment) {
-    if (!assignment?.subject) return 'No class assigned';
+  function teacherOptions(assignment) {
+    const selected = new Set(
+      getAssignmentTeachers(assignment).map(teacher => teacher.id)
+    );
 
-    return `${esc(assignment.subject)} · ${esc(teacherNames(assignment))}`;
+    return data.teachers.map(teacher => `
+      <option value="${esc(teacher.id)}"
+        ${selected.has(teacher.id) ? 'selected' : ''}>
+        ${esc(teacher.initials)} · ${esc(teacher.name)}
+      </option>
+    `).join('');
   }
 
   return `
     ${hero(
       'Daily actual routine archive',
-      'Preview and permanently save the actual timetable for every section on a selected BS date.'
+      'Review and correct the actual timetable for every section before saving the daily snapshot.'
     )}
 
     <section class="panel controls">
@@ -1138,7 +1155,11 @@ function dailyArchiveView() {
 
       <div class="date-info">
         <b>${archive ? esc(archive.weekday) : 'Date information'}</b>
-        <small>${archive ? `AD ${esc(archive.dateAD)}` : 'Enter a valid BS date'}</small>
+        <small>
+          ${archive
+            ? `AD ${esc(archive.dateAD)}`
+            : 'Enter a valid BS date'}
+        </small>
       </div>
     </section>
 
@@ -1153,7 +1174,9 @@ function dailyArchiveView() {
         <div class="record">
           <div>
             <b>
-              ${savedArchive ? 'Saved daily snapshot' : 'Preview — not yet saved'}
+              ${savedArchive
+                ? 'Saved daily snapshot'
+                : 'Preview — editable before saving'}
             </b>
             <small>
               BS ${esc(archive.dateBS)} · ${esc(archive.weekday)}
@@ -1170,8 +1193,8 @@ function dailyArchiveView() {
 
         <p class="muted">
           ${savedArchive
-            ? 'This is a stored snapshot. Later master routine or timing changes will not alter it.'
-            : 'Review the timetable below before saving. The preview does not modify your master routine.'}
+            ? 'This is a stored snapshot. Later master routine changes will not alter it.'
+            : 'You can correct the actual subject, teacher(s), and timing below. Scheduled assignments remain unchanged.'}
         </p>
       </section>
 
@@ -1179,62 +1202,96 @@ function dailyArchiveView() {
         <section class="panel">
           <h2>${esc(section)}</h2>
 
-          <div class="tablewrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Period</th>
-                  <th>Time</th>
-                  <th>Subject</th>
-                  <th>Scheduled teacher(s)</th>
-                  <th>Actual teacher(s)</th>
-                </tr>
-              </thead>
+          <div class="archive-period-list">
+            ${periods.map(item => {
+              const assignment = item.actualAssignment;
+              const selectedSubject = assignment?.subjectId || '';
 
-              <tbody>
-                ${periods.map(item => `
-                  <tr>
-                    <td>
-                      ${item.period}
-                      ${item.actualAssignment?.isLab
-                        ? '<small>Practical</small>'
-                        : ''}
-                    </td>
+              return `
+                <div class="record archive-period">
+                  <div>
+                    <b>Period ${item.period}</b>
 
-                    <td>
+                    <small>
+                      Scheduled:
+                      ${esc(
+                        item.scheduledAssignment?.subject || 'No class assigned'
+                      )}
+                      ·
+                      ${esc(teacherNames(item.scheduledAssignment))}
+                    </small>
+
+                    ${item.replacements?.length
+                      ? item.replacements.map(replacement => `
+                          <small>
+                            Conducted replacement:
+                            ${esc(replacement.originalTeacher || 'Original teacher')}
+                            → ${esc(replacement.replacementTeacher)}
+                          </small>
+                        `).join('')
+                      : ''}
+                  </div>
+
+                  ${!savedArchive && assignment ? `
+                    <div class="archive-editor">
+                      <label>Actual subject
+                        <select
+                          data-archive-subject="${esc(section)}:${item.period}">
+                          <option value="">Choose subject</option>
+                          ${data.subjects.map(subject => `
+                            <option value="${esc(subject.id)}"
+                              ${subject.id === selectedSubject ? 'selected' : ''}>
+                              ${esc(subject.name)}
+                            </option>
+                          `).join('')}
+                        </select>
+                      </label>
+
+                      <label>Actual teacher(s)
+                        <select
+                          multiple
+                          size="${Math.min(Math.max(data.teachers.length, 2), 5)}"
+                          data-archive-teachers="${esc(section)}:${item.period}">
+                          ${teacherOptions(assignment)}
+                        </select>
+                        <small class="muted">
+                          Hold Ctrl (or Command) to select multiple teachers.
+                        </small>
+                      </label>
+
+                      <div class="formgrid">
+                        <label>Actual start time
+                          <input
+                            type="time"
+                            data-archive-start="${esc(section)}:${item.period}"
+                            value="${esc(item.timing?.start || '')}">
+                        </label>
+
+                        <label>Actual end time
+                          <input
+                            type="time"
+                            data-archive-end="${esc(section)}:${item.period}"
+                            value="${esc(item.timing?.end || '')}">
+                        </label>
+                      </div>
+                    </div>
+                  ` : `
+                    <div>
+                      <b>Actual subject:</b>
+                      ${esc(assignment?.subject || 'No class assigned')}
+                      <br>
+                      <b>Actual teacher(s):</b>
+                      ${esc(teacherNames(assignment))}
+                      <br>
+                      <b>Actual time:</b>
                       ${item.timing?.start && item.timing?.end
                         ? `${esc(item.timing.start)}–${esc(item.timing.end)}`
                         : '—'}
-                    </td>
-
-                    <td>
-                      ${esc(
-                        item.actualAssignment?.subject ||
-                        item.scheduledAssignment?.subject ||
-                        '—'
-                      )}
-                    </td>
-
-                    <td>
-                      ${esc(teacherNames(item.scheduledAssignment))}
-                    </td>
-
-                    <td>
-                      <b>${esc(teacherNames(item.actualAssignment))}</b>
-
-                      ${item.replacements?.length
-                        ? item.replacements.map(replacement => `
-                            <small>
-                              Replaced ${esc(replacement.originalTeacher || 'original teacher')}
-                              with ${esc(replacement.replacementTeacher)}
-                            </small>
-                          `).join('')
-                        : ''}
-                    </td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
+                    </div>
+                  `}
+                </div>
+              `;
+            }).join('')}
           </div>
         </section>
       `).join('')}
@@ -1259,7 +1316,9 @@ function dailyArchiveView() {
       `).join('') || '<p class="muted">No daily archives saved yet.</p>'}
     </section>
   `;
+
 }
+
 
 
 /* -------------------------------------------------------
@@ -2297,6 +2356,7 @@ function wire() {
     render();
   });
    
+
   /* Daily archive */
 
   $('#archiveDate')?.addEventListener('change', event => {
@@ -2308,19 +2368,128 @@ function wire() {
     }
 
     selectedArchiveBS = value;
+    archiveDraft = null;
     render();
   });
 
+  document.querySelectorAll('[data-archive-subject]').forEach(select => {
+    select.addEventListener('change', () => {
+      if (!archiveDraft) return;
+
+      const [section, periodText] = select.dataset.archiveSubject.split(':');
+      const period = Number(periodText);
+
+      const item = archiveDraft.sections[section]?.find(
+        entry => entry.period === period
+      );
+
+      if (!item?.actualAssignment) return;
+
+      const subject = data.subjects.find(
+        entry => entry.id === select.value
+      );
+
+      if (!subject) return;
+
+      item.actualAssignment.subjectId = subject.id;
+      item.actualAssignment.subject = subject.name;
+    });
+  });
+
+  document.querySelectorAll('[data-archive-teachers]').forEach(select => {
+    select.addEventListener('change', () => {
+      if (!archiveDraft) return;
+
+      const [section, periodText] = select.dataset.archiveTeachers.split(':');
+      const period = Number(periodText);
+
+      const item = archiveDraft.sections[section]?.find(
+        entry => entry.period === period
+      );
+
+      if (!item?.actualAssignment) return;
+
+      const teachers = [...select.selectedOptions].map(option => {
+        const teacher = data.teachers.find(
+          entry => entry.id === option.value
+        );
+
+        return teacher ? {
+          id: teacher.id,
+          name: teacher.name,
+          initials: teacher.initials
+        } : null;
+      }).filter(Boolean);
+
+      const assignment = item.actualAssignment;
+
+      assignment.teachers = teachers;
+      assignment.teacherIds = teachers.map(teacher => teacher.id);
+      assignment.teacherId = teachers[0]?.id || '';
+      assignment.teacherName = teachers[0]?.name || '';
+      assignment.teacherInitials = teachers[0]?.initials || '';
+    });
+  });
+
+  document.querySelectorAll('[data-archive-start]').forEach(input => {
+    input.addEventListener('change', () => {
+      if (!archiveDraft) return;
+
+      const [section, periodText] = input.dataset.archiveStart.split(':');
+      const period = Number(periodText);
+
+      const item = archiveDraft.sections[section]?.find(
+        entry => entry.period === period
+      );
+
+      if (!item) return;
+
+      if (!item.timing) {
+        item.timing = { period, start: '', end: '' };
+      }
+
+      item.timing.start = input.value;
+    });
+  });
+
+  document.querySelectorAll('[data-archive-end]').forEach(input => {
+    input.addEventListener('change', () => {
+      if (!archiveDraft) return;
+
+      const [section, periodText] = input.dataset.archiveEnd.split(':');
+      const period = Number(periodText);
+
+      const item = archiveDraft.sections[section]?.find(
+        entry => entry.period === period
+      );
+
+      if (!item) return;
+
+      if (!item.timing) {
+        item.timing = { period, start: '', end: '' };
+      }
+
+      item.timing.end = input.value;
+    });
+  });
+
   $('#saveDailyArchive')?.addEventListener('click', async () => {
+    if (!archiveDraft) {
+      notify('No editable daily archive preview is available.');
+      return;
+    }
+
     if (!confirm(
-      `Save the actual routine for BS ${selectedArchiveBS}? This will create a permanent daily snapshot.`
+      `Save the corrected actual routine for BS ${selectedArchiveBS}?`
     )) {
       return;
     }
 
     try {
-      saveDailyArchive(data, selectedArchiveBS);
+      saveDailyArchive(data, selectedArchiveBS, archiveDraft);
       await persist();
+
+      archiveDraft = null;
 
       notify('Daily actual routine archived successfully.');
       render();
@@ -2332,9 +2501,11 @@ function wire() {
   document.querySelectorAll('[data-open-archive]').forEach(button => {
     button.addEventListener('click', () => {
       selectedArchiveBS = button.dataset.openArchive;
+      archiveDraft = null;
       render();
     });
   });
+
 
   /* Replacement records */
   document.querySelectorAll('[data-record-status]').forEach(select => {
