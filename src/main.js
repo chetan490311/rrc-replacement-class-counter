@@ -46,7 +46,6 @@ import {
 } from './teacher-history.js';
 
 import {
-import {
   createReplacementRecord,
   createPracticalReplacementRecords,
   REPLACEMENT_STATUSES,
